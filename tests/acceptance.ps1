@@ -46,6 +46,53 @@ function New-Fixture([string]$Name) {
     return $path
 }
 
+function New-InstallSourceFixture([string]$Root) {
+    $copy = Join-Path $Root 'source'
+    foreach ($relative in (@('install.ps1') + @(Get-SafeDeleteInstallManifest))) {
+        if ($relative -eq 'safedelete.cmd') { continue }
+        $target = Join-Path $copy $relative
+        [void][IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($target))
+        [IO.File]::Copy((Join-Path $SourceRoot $relative), $target)
+    }
+    return $copy
+}
+
+function New-RolledBackFixture([string]$Name, [bool]$ExistingConfiguration) {
+    $root = New-Fixture $Name
+    $codexHome = Join-Path $root 'codex-home'
+    $installDir = Join-Path $root 'installed'
+    [void][IO.Directory]::CreateDirectory($codexHome)
+    [void][IO.Directory]::CreateDirectory((Join-Path $installDir 'backup'))
+    [void][IO.Directory]::CreateDirectory((Join-Path $installDir 'src'))
+    $files = @('uninstall.ps1','src\InstallState.ps1')
+    foreach ($relative in $files) { [IO.File]::Copy((Join-Path $SourceRoot $relative), (Join-Path $installDir $relative)) }
+    # Trap PATH restoration in this isolated copy; a regression must never write
+    # the real User PATH, even when the recorded original differs from it.
+    $module = Join-Path $installDir 'src\InstallState.ps1'
+    $moduleText = [IO.File]::ReadAllText($module)
+    $pathWrite = "[Environment]::SetEnvironmentVariable('Path', `$State.original_user_path, 'User')"
+    Assert-True ($moduleText.Contains($pathWrite)) 'Rollback fixture could not guard the User PATH write'
+    [IO.File]::WriteAllText($module, $moduleText.Replace($pathWrite, "throw 'Rollback cleanup attempted to restore User PATH.'"), (New-Object Text.UTF8Encoding($false)))
+    $snapshots = @()
+    foreach ($name in @('config.toml','hooks.json')) {
+        $path = Join-Path $codexHome $name
+        if ($ExistingConfiguration) {
+            $content = if ($name -eq 'config.toml') { "# original configuration`r`n" } else { '{"hooks":{}}' }
+            [IO.File]::WriteAllText($path, $content, (New-Object Text.UTF8Encoding($false)))
+            [IO.File]::Copy($path, (Join-Path $installDir ('backup\' + $name)))
+        }
+        $snapshots += [pscustomobject]@{ name=$name; path=$path; existed=$ExistingConfiguration; original_hash=(Get-SafeDeleteFileHash $path); installed_hash=$null }
+    }
+    $state = [pscustomobject]@{
+        version=1; phase='rolled-back'; install_dir=$installDir; codex_home=$codexHome
+        hook_command=''; snapshots=$snapshots; files=$files; path_updated=$true
+        original_user_path='SAFEDELETE_TEST_OLD_PATH'; original_process_path='SAFEDELETE_TEST_OLD_PROCESS_PATH'
+        installed_user_path='SAFEDELETE_TEST_INSTALLED_PATH'
+    }
+    Write-SafeDeleteJson (Join-Path $installDir 'install-state.json') $state
+    return [pscustomobject]@{ root=$root; codexHome=$codexHome; installDir=$installDir }
+}
+
 function ConvertTo-NativeArgument([string]$Value) {
     if ($Value.Length -eq 0) { return '""' }
     if ($Value -notmatch '[\s"]') { return $Value }
@@ -595,6 +642,113 @@ Invoke-Case 'Desktop pipe rotation guard refuses unrelated edits and ambiguous c
 }
 
 if (-not $SkipInstall) {
+    foreach ($existingConfiguration in @($true,$false)) {
+        $label = if ($existingConfiguration) { 'edited' } else { 'new' }
+        Invoke-Case ("rolled-back cleanup preserves $label configuration hooks and current PATH") {
+            $fixture = New-RolledBackFixture ('rollback-' + $label) $existingConfiguration
+            $configPath = Join-Path $fixture.codexHome 'config.toml'
+            $hooksPath = Join-Path $fixture.codexHome 'hooks.json'
+            [IO.File]::WriteAllText($configPath, "# user's configuration after rollback`r`n", (New-Object Text.UTF8Encoding($false)))
+            [IO.File]::WriteAllText($hooksPath, '{"hooks":{"PreToolUse":[]},"user_after_rollback":true}', (New-Object Text.UTF8Encoding($false)))
+            $configHash = Get-SafeDeleteFileHash $configPath
+            $hooksHash = Get-SafeDeleteFileHash $hooksPath
+            $userPathBefore = [Environment]::GetEnvironmentVariable('Path','User')
+            $uninstalled = Invoke-Process -Program $ShellPath -Arguments @('-NoLogo','-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',(Join-Path $fixture.installDir 'uninstall.ps1'),'-CodexHome',$fixture.codexHome,'-InstallDir',$fixture.installDir,'-NoPathUpdate') -WorkingDirectory $fixture.root
+            Assert-True ($uninstalled.exitCode -eq 0) "Rollback cleanup failed (exit $($uninstalled.exitCode)); see process evidence"
+            Assert-True ((Get-SafeDeleteFileHash $configPath) -eq $configHash) 'Rollback cleanup replaced or removed later user configuration'
+            Assert-True ((Get-SafeDeleteFileHash $hooksPath) -eq $hooksHash) 'Rollback cleanup replaced or removed later user hooks'
+            Assert-True ([string]::Equals([Environment]::GetEnvironmentVariable('Path','User'),$userPathBefore,[StringComparison]::Ordinal)) 'Rollback cleanup changed the real User PATH'
+            Assert-True (-not (Test-Path -LiteralPath $fixture.installDir)) 'Rollback cleanup left installed files behind'
+            $script:evidence.Add([pscustomobject]@{ originalFilesExisted=$existingConfiguration; laterConfigurationPreserved=$true; laterHooksPreserved=$true; pathRestorationTrapped=$true; realUserPathUnchanged=$true; installationRemoved=$true })
+        }
+    }
+
+    Invoke-Case 'failed rollback state writes leave uncertain installations protected' {
+        foreach ($failurePhase in @('rolling-back','rolled-back')) {
+            $root = New-Fixture ('rollback-write-failure-' + $failurePhase)
+            $sourceCopy = New-InstallSourceFixture $root
+            $codexHome = Join-Path $root 'codex-home'
+            $installDir = Join-Path $root 'installed'
+            [void][IO.Directory]::CreateDirectory($codexHome)
+            $configPath = Join-Path $codexHome 'config.toml'
+            $hooksPath = Join-Path $codexHome 'hooks.json'
+            [IO.File]::WriteAllText($configPath, "# original configuration`r`n", (New-Object Text.UTF8Encoding($false)))
+            [IO.File]::WriteAllText($hooksPath, '{"hooks":{}}', (New-Object Text.UTF8Encoding($false)))
+            $originalConfigHash = Get-SafeDeleteFileHash $configPath
+            $originalHooksHash = Get-SafeDeleteFileHash $hooksPath
+            [IO.File]::AppendAllText((Join-Path $sourceCopy 'hooks\Trust.ps1'), "`r`nfunction Get-SafeDeleteHookRegistration { throw 'Injected local hook registration failure.' }`r`n")
+            $fault = @'
+
+function Write-SafeDeleteJson {
+    param([string]$Path, $Value)
+    if ($Value.PSObject.Properties['phase'] -and $Value.phase -eq 'FAULT_PHASE') { throw 'Injected rollback state write failure.' }
+    $encoding = New-Object System.Text.UTF8Encoding($false)
+    Write-SafeDeleteBytes $Path ($encoding.GetBytes(($Value | ConvertTo-Json -Depth 30)))
+}
+'@
+            [IO.File]::AppendAllText((Join-Path $sourceCopy 'src\InstallState.ps1'), $fault.Replace('FAULT_PHASE',$failurePhase), (New-Object Text.UTF8Encoding($false)))
+            $failedInstall = Invoke-Process -Program $ShellPath -Arguments @('-NoLogo','-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',(Join-Path $sourceCopy 'install.ps1'),'-CodexHome',$codexHome,'-InstallDir',$installDir,'-NoPathUpdate') -WorkingDirectory $root
+            Assert-True ($failedInstall.exitCode -ne 0 -and $failedInstall.stderr -match 'Injected rollback state write failure') 'Installer did not encounter the injected rollback state write failure'
+            $statePath = Join-Path $installDir 'install-state.json'
+            $state = [IO.File]::ReadAllText($statePath) | ConvertFrom-Json
+            $expectedPhase = if ($failurePhase -eq 'rolling-back') { 'installing' } else { 'rolling-back' }
+            Assert-True ($state.phase -eq $expectedPhase) 'Failed state write left a state that can be unsafely uninstalled'
+            if ($failurePhase -eq 'rolled-back') {
+                Assert-True ((Get-SafeDeleteFileHash $configPath) -eq $originalConfigHash -and (Get-SafeDeleteFileHash $hooksPath) -eq $originalHooksHash) 'Rollback did not restore configuration before its final state write failed'
+            }
+            [IO.File]::AppendAllText($configPath, "`r`n# later user configuration`r`n")
+            [IO.File]::AppendAllText($hooksPath, "`r`n ")
+            $configHash = Get-SafeDeleteFileHash $configPath
+            $hooksHash = Get-SafeDeleteFileHash $hooksPath
+            $stateHash = Get-SafeDeleteFileHash $statePath
+            $userPathBefore = [Environment]::GetEnvironmentVariable('Path','User')
+            $uninstalled = Invoke-Process -Program $ShellPath -Arguments @('-NoLogo','-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',(Join-Path $SourceRoot 'uninstall.ps1'),'-CodexHome',$codexHome,'-InstallDir',$installDir,'-NoPathUpdate') -WorkingDirectory $root
+            Assert-True ($uninstalled.exitCode -ne 0) 'Uninstall accepted an uncertain rollback state'
+            Assert-True ((Get-SafeDeleteFileHash $configPath) -eq $configHash -and (Get-SafeDeleteFileHash $hooksPath) -eq $hooksHash) 'Uninstall changed configuration during uncertain rollback'
+            Assert-True ((Get-SafeDeleteFileHash $statePath) -eq $stateHash) 'Uninstall changed uncertain installation state'
+            Assert-True ((Get-SafeDeleteFileHash (Join-Path $installDir 'backup\config.toml')) -eq $originalConfigHash -and (Get-SafeDeleteFileHash (Join-Path $installDir 'backup\hooks.json')) -eq $originalHooksHash) 'Uninstall removed or changed rollback backups'
+            Assert-True ([string]::Equals([Environment]::GetEnvironmentVariable('Path','User'),$userPathBefore,[StringComparison]::Ordinal)) 'Uncertain rollback uninstall changed the real User PATH'
+            $script:evidence.Add([pscustomobject]@{ failedStateWrite=$failurePhase; persistedPhase=$state.phase; uninstallRefused=$true; laterConfigurationPreserved=$true; laterHooksPreserved=$true; backupsPreserved=$true; realUserPathUnchanged=$true })
+        }
+    }
+
+    Invoke-Case 'hook verification timeout rolls back and permits cleanup before reinstall' {
+        $root = New-Fixture 'installation-timeout-retry'
+        $sourceCopy = New-InstallSourceFixture $root
+        $hookPath = Join-Path $sourceCopy 'hooks\pre-tool-use.ps1'
+        [IO.File]::WriteAllText($hookPath, "Start-Sleep -Seconds 11`r`n" + [IO.File]::ReadAllText($hookPath), (New-Object Text.UTF8Encoding($false)))
+        $codexHome = Join-Path $root 'codex-home'
+        $installDir = Join-Path $root 'installed'
+        [void][IO.Directory]::CreateDirectory($codexHome)
+        $configPath = Join-Path $codexHome 'config.toml'
+        $hooksPath = Join-Path $codexHome 'hooks.json'
+        [IO.File]::WriteAllText($configPath, "# original configuration`r`n", (New-Object Text.UTF8Encoding($false)))
+        [IO.File]::WriteAllText($hooksPath, '{"hooks":{}}', (New-Object Text.UTF8Encoding($false)))
+        $originalConfigHash = Get-SafeDeleteFileHash $configPath
+        $originalHooksHash = Get-SafeDeleteFileHash $hooksPath
+        $userPathBefore = [Environment]::GetEnvironmentVariable('Path','User')
+        $failedInstall = Invoke-Process -Program $ShellPath -Arguments @('-NoLogo','-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',(Join-Path $sourceCopy 'install.ps1'),'-CodexHome',$codexHome,'-InstallDir',$installDir,'-NoPathUpdate') -WorkingDirectory $root
+        Assert-True ($failedInstall.exitCode -ne 0 -and $failedInstall.stderr -match 'Hook runtime verification timed out') 'Installer did not report the real hook verification timeout'
+        $state = [IO.File]::ReadAllText((Join-Path $installDir 'install-state.json')) | ConvertFrom-Json
+        Assert-True ($state.phase -eq 'rolled-back') 'Timed out installation did not complete rollback'
+        Assert-True ((Get-SafeDeleteFileHash $configPath) -eq $originalConfigHash -and (Get-SafeDeleteFileHash $hooksPath) -eq $originalHooksHash) 'Timeout rollback did not restore original configuration and hooks'
+        [IO.File]::AppendAllText($configPath, "# user's change after timeout`r`n")
+        [IO.File]::AppendAllText($hooksPath, "`r`n")
+        $laterConfigHash = Get-SafeDeleteFileHash $configPath
+        $laterHooksHash = Get-SafeDeleteFileHash $hooksPath
+        $uninstallArgs = @('-NoLogo','-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',(Join-Path $SourceRoot 'uninstall.ps1'),'-CodexHome',$codexHome,'-InstallDir',$installDir,'-NoPathUpdate')
+        $cleanup = Invoke-Process -Program $ShellPath -Arguments $uninstallArgs -WorkingDirectory $root
+        Assert-True ($cleanup.exitCode -eq 0 -and -not (Test-Path -LiteralPath $installDir)) 'Timed out installation could not be safely cleaned up'
+        Assert-True ((Get-SafeDeleteFileHash $configPath) -eq $laterConfigHash -and (Get-SafeDeleteFileHash $hooksPath) -eq $laterHooksHash) 'Timeout cleanup overwrote later configuration or hooks'
+        $installed = Invoke-Process -Program $ShellPath -Arguments @('-NoLogo','-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',(Join-Path $SourceRoot 'install.ps1'),'-CodexHome',$codexHome,'-InstallDir',$installDir,'-NoPathUpdate') -WorkingDirectory $root
+        Assert-True ($installed.exitCode -eq 0) "Reinstall after timeout cleanup failed (exit $($installed.exitCode)); see process evidence"
+        $uninstalled = Invoke-Process -Program $ShellPath -Arguments $uninstallArgs -WorkingDirectory $root
+        Assert-True ($uninstalled.exitCode -eq 0) 'Reinstalled fixture could not be uninstalled'
+        Assert-True ((Get-SafeDeleteFileHash $configPath) -eq $laterConfigHash -and (Get-SafeDeleteFileHash $hooksPath) -eq $laterHooksHash) 'Reinstall and uninstall did not preserve the later user configuration'
+        Assert-True ([string]::Equals([Environment]::GetEnvironmentVariable('Path','User'),$userPathBefore,[StringComparison]::Ordinal)) 'Timeout retry test changed the real User PATH'
+        $script:evidence.Add([pscustomobject]@{ realHookTimeout=$true; rollbackCompleted=$true; cleanupPreservedLaterConfiguration=$true; reinstallSucceeded=$true; reinstallUninstallPreservedBaseline=$true; realUserPathUnchanged=$true })
+    }
+
     Invoke-Case 'isolated install, repeat install, and exact uninstall restoration' {
         $root = New-Fixture 'installation'
         $codexHome = Join-Path $root 'codex-home'

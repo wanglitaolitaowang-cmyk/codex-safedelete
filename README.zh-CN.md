@@ -87,6 +87,7 @@ safedelete undo
 | PowerShell 5.1 / 7，Windows build 22631 (23H2) | 已验证；尚未在独立 Windows 10 电脑测试 |
 | Codex CLI 0.160.0，本地 `codex.exe` | 真实 Hook → 安全保存 → undo → 卸载通过 |
 | Codex Desktop 26.930.3930.0 | 真实安装、完全重启、删除拦截、undo、默认卸载通过 |
+| PowerShell 5.1 / 7 混用、Windows 936 / 65001 代码页 | 特殊字符路径、二进制内容及空目录已验证 |
 
 暂停与恢复、Desktop 完全重启后的状态持久化、旧记录恢复和默认卸载也已验证。
 本机 Desktop 测试需要用户手动允许 360 对 Hook 和控制台宿主的提示。
@@ -98,7 +99,9 @@ safedelete undo
 执行策略绕过仅用于本次进程，不改变已保存的执行策略。
 现有安装程序会检查 Hook 注册、信任和执行，验证成功才报告安装完成。
 若 PATH 中没有 `codex.exe`，会自动检查 Codex Desktop 的本地程序目录。
-本地 Codex 初始化超时后，安装会回滚；请阅读错误，再双击安装入口重试。
+若本地 Codex 初始化超时且回滚已完成，先双击 `Uninstall SafeDelete.cmd` 清理残留安装，
+再双击 `Install SafeDelete.cmd` 重试。清理会保留回滚后对配置和 PATH 的修改。
+若回滚未完成，先检查错误及保留的配置备份，再处理重试。
 
 高级用户可在解压后的项目目录用 PowerShell 安装：
 
@@ -126,6 +129,10 @@ safedelete delete src/    # 主动安全删除
 
 文件保存在 `.codex-safedelete/trash/`。`history.json` 记录原路径、名称、UTC 时间、恢复路径和触发命令。
 恢复不会覆盖已有路径。需要恢复期间，请保留该目录。
+
+未实际移动文件的失败删除不会挡住之前有效删除的撤销。
+删除和恢复会读取内容生成本地校验值，以便安全核对中断记录；大文件可能耗时更长。
+旧版中断记录可能缺少这些校验信息，需要核对后手工恢复，剩余保存区文件仍会保留。
 
 暂停开关对整套安装生效，重启 Codex 后仍保留。
 它只修改安装目录中的 `protection-state.json`，不修改 Codex 配置或 PATH。
@@ -166,8 +173,9 @@ Hook 也会处理已识别的 shell 删除。安装前已永久删除的文件�
 Hook 会拒绝代理调用的不透明脚本。
 
 安装会保留已有 Hook，并逐字节备份原 Codex 配置。
-卸载恢复原配置，并移除 SafeDelete 的 PATH 项；项目内的恢复文件保留。
+完整安装后的卸载恢复原配置，并移除 SafeDelete 的 PATH 项；项目内的恢复文件保留。
 若用户后来修改了配置或 PATH，卸载会停止，避免覆盖，并提供备份位置。
+若安装已完整回滚，卸载只清理残留安装文件，保留当前配置和 PATH。
 Desktop 的临时 `codex-computer-use` 命名管道 GUID 变化，仅在内存回填该值后，
 整份配置哈希与已安装配置完全匹配时接受；其他配置或 PATH 变化仍会阻止卸载。
 

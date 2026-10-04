@@ -35,8 +35,14 @@ foreach ($item in $owned) {
         if ($relative -notin $known) { throw ('Unexpected file in installation: ' + $relative + '. Move it out before uninstalling.') }
     }
 }
-Restore-SafeDeleteConfiguration -State $state -InstallDir $InstallDir
+if ($state.phase -eq 'complete') {
+    Restore-SafeDeleteConfiguration -State $state -InstallDir $InstallDir
+}
 # InstallDir was resolved, matched to its state, and checked item by item above.
 Remove-Item -LiteralPath $InstallDir -Recurse -Force
-Write-Output 'Codex SafeDelete uninstalled. Original Codex configuration restored.'
+if ($state.phase -eq 'rolled-back') {
+    Write-Output 'Codex SafeDelete rollback files removed. Current Codex configuration and PATH preserved.'
+} else {
+    Write-Output 'Codex SafeDelete uninstalled. Original Codex configuration restored.'
+}
 Write-Output 'Recoverable trash and history in projects are preserved.'

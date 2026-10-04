@@ -90,6 +90,7 @@ MIT licensed.
 | PowerShell 5.1 / 7 on Windows build 22631 (23H2) | Verified; a separate Windows 10 machine has not been tested |
 | Codex CLI 0.160.0 with a local `codex.exe` | Real Hook → trash → undo → uninstall verified |
 | Codex Desktop 26.930.3930.0 | Real install, full restart, deletion interception, undo and default uninstall verified |
+| Mixed PowerShell 5.1 / 7 and Windows code pages 936 / 65001 | Unicode paths, binary bytes and empty directories verified |
 
 Pause/resume, persistence after full Desktop restarts, recovery of earlier
 records and default uninstall are also verified. This machine's Desktop run
@@ -104,8 +105,11 @@ and keep the result window open. Execution-policy bypass applies only to
 that process; your saved execution policy is unchanged. The existing installer
 checks Hook registration, trust and execution before reporting success.
 If `codex.exe` is absent from PATH, it checks Codex Desktop's local binary
-folder automatically. If local Codex initialization times out, installation
-rolls back; read the error and double-click the installer again.
+folder automatically. If local Codex initialization times out and rollback
+finishes, first double-click `Uninstall SafeDelete.cmd` to remove the leftover
+installation, then double-click `Install SafeDelete.cmd` to retry. Cleanup keeps
+configuration and PATH changes made after rollback. If rollback is incomplete,
+inspect the error and preserved backups before retrying.
 
 Advanced users can install from PowerShell in the extracted project folder:
 
@@ -131,6 +135,11 @@ safedelete delete src/    # Delete safely yourself
 Files stay in `.codex-safedelete/trash/`. `history.json` records the original
 path, name, UTC time, recovery path and triggering command. Restore never
 overwrites an existing path. Keep this directory until you no longer need recovery.
+
+Failed deletes that moved no files do not block undo of an earlier deletion.
+Content checks allow interrupted restores to finish safely; reading large files
+can take longer. An interrupted record from an older version may lack these
+checks and require manual recovery. Its remaining trash is preserved.
 
 The pause switch is installation-wide and persists across Codex restarts.
 It changes only `protection-state.json` in the installation folder; Codex
@@ -179,9 +188,11 @@ Use the launchers or a separate PowerShell terminal for installation and
 uninstallation. The Hook deliberately refuses opaque scripts invoked by the agent.
 
 The installer preserves existing hooks and backs up the original Codex
-configuration byte for byte. Uninstall restores it and removes its PATH entry;
-project trash stays available. If configuration or PATH was changed afterward,
-uninstall stops before overwriting those changes and points to the backups.
+configuration byte for byte. Uninstall of a completed installation restores it
+and removes its PATH entry; project trash stays available. If configuration or
+PATH was changed afterward, uninstall stops before overwriting those changes
+and points to the backups. After a completed rollback, uninstall only removes
+the leftover installation files and keeps the current configuration and PATH.
 Desktop's temporary `codex-computer-use` named-pipe GUID rotation is accepted
 only if restoring that value in memory reproduces the complete installed
 configuration hash. Other configuration or PATH changes still stop uninstall.

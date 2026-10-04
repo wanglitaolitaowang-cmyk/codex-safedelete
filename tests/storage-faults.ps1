@@ -38,12 +38,38 @@ function Test-Case {
     }
 }
 
+function Invoke-FinalJournalFault {
+    param([string]$Root, [object]$Record)
+    $nativeMove = ${function:Move-SDItem}
+    $fault = [pscustomobject]@{ handle = $null }
+    # Perform the real filesystem renames. Only when the final payload reaches
+    # its original path do we lock the journal against Replace/FileShare.Delete.
+    function Move-SDItem {
+        param([string]$Source, [string]$Destination, [string]$Type)
+        & $nativeMove $Source $Destination $Type
+        if (@($Record.items | Where-Object { Test-Path -LiteralPath $_.trash_path }).Count -eq 0) {
+            $fault.handle = [IO.File]::Open((Join-Path $Root '.codex-safedelete\history.json'),
+                [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
+        }
+    }
+    try {
+        $failed = $false
+        try { $null = Restore-SafeDeleteRecord $Root $Record.id } catch { $failed = $true }
+        Assert-True $failed 'The final journal write unexpectedly succeeded.'
+        Assert-True ($null -ne $fault.handle) 'The fault was not injected after all real moves.'
+        Assert-True (@(Get-SafeDeleteHistory $Root | Where-Object { $_.id -eq $Record.id })[0].status -eq 'restoring') 'The failed final write was not durable as restoring.'
+        foreach ($item in $Record.items) {
+            Assert-True ((Test-Path -LiteralPath $item.original_path) -and -not (Test-Path -LiteralPath $item.trash_path)) 'The fault did not occur after every payload was restored.'
+        }
+    } finally { if ($null -ne $fault.handle) { $fault.handle.Dispose() } }
+}
+
 Test-Case 'pending move failure is recoverable' {
     $root = New-Fixture 'pending'
     $a = Join-Path $root 'a.txt'; $b = Join-Path $root 'b.txt'
     [IO.File]::WriteAllText($a, 'first'); [IO.File]::WriteAllText($b, 'second')
     # No FILE_SHARE_DELETE: the second rename genuinely fails on Windows.
-    $handle = [IO.File]::Open($b, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::None)
+    $handle = [IO.File]::Open($b, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
     try {
         $failed = $false
         try { $null = Move-SafeDeleteItems $root @($a, $b) 'rm a.txt b.txt' }
@@ -63,7 +89,7 @@ Test-Case 'interrupted restore can be retried' {
     $a = Join-Path $root 'a.txt'; $b = Join-Path $root 'b.txt'
     [IO.File]::WriteAllText($a, 'first'); [IO.File]::WriteAllText($b, 'second')
     $record = Move-SafeDeleteItems $root @($a, $b) 'del a.txt b.txt'
-    $handle = [IO.File]::Open($record.items[1].trash_path, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::None)
+    $handle = [IO.File]::Open($record.items[1].trash_path, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
     try {
         $failed = $false
         try { $null = Restore-SafeDeleteRecord $root $record.id } catch { $failed = $true }
@@ -108,21 +134,205 @@ foreach ($part in @('history.json', 'store.lock')) {
     }
 }
 
-Test-Case 'pending record with no payload does not claim success' {
+Test-Case 'first move failure cancels without claiming a restore' {
     $root = New-Fixture 'zero-payload'
+    $file = Join-Path $root 'payload.txt'
+    [IO.File]::WriteAllText($file, 'payload')
+    $handle = [IO.File]::Open($file, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
+    try {
+        $failed = $false
+        try { $null = Move-SafeDeleteItems $root @($file) 'rm payload.txt' }
+        catch { if ($_.Exception.Message -like 'SafeDelete move interrupted*') { $failed = $true } else { throw } }
+        Assert-True $failed 'The locked first file did not interrupt its move.'
+    } finally { $handle.Dispose() }
+    $history = @(Get-SafeDeleteHistory $root)
+    Assert-True ($history.Count -eq 1 -and $history[0].status -eq 'pending') 'The zero-move journal was not pending.'
+    $failed = $false
+    try { $null = Restore-SafeDeleteRecord $root $history[0].id }
+    catch { if ($_.Exception.Message -like 'Record cancelled; no files were restored*') { $failed = $true } else { throw } }
+    Assert-True $failed 'An empty recovery incorrectly reported success.'
+    Assert-True ([IO.File]::ReadAllText($file) -eq 'payload') 'The original file changed.'
+    Assert-True (@(Get-SafeDeleteHistory $root)[0].status -eq 'cancelled') 'A verified zero-move record was not cancelled.'
+}
+
+Test-Case 'undo skips a cancelled zero-move record and restores older data' {
+    $root = New-Fixture 'undo-after-zero-move'
+    $old = Join-Path $root 'older.txt'; $new = Join-Path $root 'newer.txt'
+    [IO.File]::WriteAllText($old, 'older'); [IO.File]::WriteAllText($new, 'newer')
+    $previous = Move-SafeDeleteItems $root @($old) 'rm older.txt'
+    $handle = [IO.File]::Open($new, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
+    try {
+        try { $null = Move-SafeDeleteItems $root @($new) 'rm newer.txt'; throw 'The first move unexpectedly succeeded.' }
+        catch { if ($_.Exception.Message -notlike 'SafeDelete move interrupted*') { throw } }
+    } finally { $handle.Dispose() }
+    $restored = Restore-SafeDeleteRecord $root
+    Assert-True ($restored.id -eq $previous.id) 'Undo did not reach the older recoverable record.'
+    Assert-True ([IO.File]::ReadAllText($old) -eq 'older' -and [IO.File]::ReadAllText($new) -eq 'newer') 'Undo changed or lost original contents.'
+    $history = @(Get-SafeDeleteHistory $root)
+    Assert-True ($history[0].status -eq 'restored' -and $history[1].status -eq 'cancelled') 'Undo journal confused cancelled and restored records.'
+}
+
+Test-Case 'pending original replacement prevents cancellation and older undo' {
+    $root = New-Fixture 'pending-replacement'
+    $old = Join-Path $root 'older.txt'; $file = Join-Path $root 'pending.txt'
+    [IO.File]::WriteAllText($old, 'older'); [IO.File]::WriteAllText($file, 'before')
+    $previous = Move-SafeDeleteItems $root @($old) 'rm older.txt'
+    $handle = [IO.File]::Open($file, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
+    try {
+        try { $null = Move-SafeDeleteItems $root @($file) 'rm pending.txt'; throw 'The first move unexpectedly succeeded.' }
+        catch { if ($_.Exception.Message -notlike 'SafeDelete move interrupted*') { throw } }
+    } finally { $handle.Dispose() }
+    [IO.File]::WriteAllText($file, 'after!')
+    $failed = $false
+    try { $null = Restore-SafeDeleteRecord $root }
+    catch { if ($_.Exception.Message -like 'Restore conflict*') { $failed = $true } else { throw } }
+    Assert-True $failed 'A replacement original was treated as an untouched pending payload.'
+    Assert-True ([IO.File]::ReadAllText($file) -eq 'after!' -and (Test-Path -LiteralPath $previous.items[0].trash_path)) 'Conflict overwrote the replacement or silently undid the older record.'
+    Assert-True (@(Get-SafeDeleteHistory $root)[1].status -eq 'pending') 'Conflicted pending record was cancelled.'
+}
+
+Test-Case 'final journal failure retries after all file and directory moves' {
+    $root = New-Fixture 'final-journal'
+    $file = Join-Path $root 'payload.txt'; $folder = Join-Path $root 'folder'
+    [IO.File]::WriteAllText($file, 'payload')
+    $null = [IO.Directory]::CreateDirectory((Join-Path $folder 'empty'))
+    [IO.File]::WriteAllText((Join-Path $folder 'child.txt'), 'child')
+    $record = Move-SafeDeleteItems $root @($file, $folder) 'rm payload.txt folder'
+    Invoke-FinalJournalFault $root $record
+    $restored = Restore-SafeDeleteRecord $root $record.id
+    Assert-True ($restored.status -eq 'restored') 'Retry failed to finish the terminal journal.'
+    Assert-True ([IO.File]::ReadAllText($file) -eq 'payload' -and [IO.File]::ReadAllText((Join-Path $folder 'child.txt')) -eq 'child' -and [IO.Directory]::Exists((Join-Path $folder 'empty'))) 'Retry changed restored file or directory contents.'
+    Assert-True (@(Get-SafeDeleteHistory $root)[0].status -eq 'restored') 'Final retry was not persisted.'
+}
+
+Test-Case 'final journal retry rejects changed same-length file contents' {
+    $root = New-Fixture 'final-journal-replacement'
+    $file = Join-Path $root 'payload.txt'
+    [IO.File]::WriteAllText($file, 'before')
+    $record = Move-SafeDeleteItems $root @($file) 'rm payload.txt'
+    Invoke-FinalJournalFault $root $record
+    [IO.File]::WriteAllText($file, 'after!')
+    $failed = $false
+    try { $null = Restore-SafeDeleteRecord $root $record.id }
+    catch { if ($_.Exception.Message -like 'Restore conflict*') { $failed = $true } else { throw } }
+    Assert-True $failed 'Retry trusted a same-length replacement file.'
+    Assert-True ([IO.File]::ReadAllText($file) -eq 'after!' -and @(Get-SafeDeleteHistory $root)[0].status -eq 'restoring') 'Retry overwrote the replacement or claimed completion.'
+}
+
+Test-Case 'final journal retry detects a removed empty directory' {
+    $root = New-Fixture 'final-journal-empty-directory'
+    $folder = Join-Path $root 'folder'; $empty = Join-Path $folder 'empty'
+    $null = [IO.Directory]::CreateDirectory($empty)
+    $record = Move-SafeDeleteItems $root @($folder) 'rm folder'
+    Invoke-FinalJournalFault $root $record
+    [IO.Directory]::Delete($empty)
+    $failed = $false
+    try { $null = Restore-SafeDeleteRecord $root $record.id }
+    catch { if ($_.Exception.Message -like 'Restore conflict*') { $failed = $true } else { throw } }
+    Assert-True $failed 'An incomplete directory tree was treated as completely restored.'
+    Assert-True (@(Get-SafeDeleteHistory $root)[0].status -eq 'restoring') 'The incomplete directory tree was marked restored.'
+}
+
+Test-Case 'active missing payload remains an error even with an original placeholder' {
+    $root = New-Fixture 'active-missing-payload'
+    $file = Join-Path $root 'payload.txt'
+    [IO.File]::WriteAllText($file, 'payload')
+    $record = Move-SafeDeleteItems $root @($file) 'rm payload.txt'
+    [IO.File]::Delete($record.items[0].trash_path)
+    [IO.File]::WriteAllText($file, 'placeholder')
+    $failed = $false
+    try { $null = Restore-SafeDeleteRecord $root }
+    catch { if ($_.Exception.Message -like 'Missing recoverable payload*') { $failed = $true } else { throw } }
+    Assert-True $failed 'A missing active payload was silently skipped.'
+    Assert-True ([IO.File]::ReadAllText($file) -eq 'placeholder' -and @(Get-SafeDeleteHistory $root)[0].status -eq 'active') 'Missing payload was reported restored or its placeholder changed.'
+}
+
+Test-Case 'legacy empty restoring is skipped without claiming completion' {
+    $root = New-Fixture 'legacy-empty-restoring'
+    $old = Join-Path $root 'older.txt'; $file = Join-Path $root 'payload.txt'
+    [IO.File]::WriteAllText($old, 'older'); [IO.File]::WriteAllText($file, 'payload')
+    $previous = Move-SafeDeleteItems $root @($old) 'rm older.txt'
+    $record = Move-SafeDeleteItems $root @($file) 'rm payload.txt'
+    Invoke-FinalJournalFault $root $record
+    $history = @(Get-SafeDeleteHistory $root)
+    foreach ($item in $history[1].items) {
+        $item.PSObject.Properties.Remove('source_fingerprint')
+        $item.PSObject.Properties.Remove('restore_fingerprint')
+    }
+    Write-SDHistory (Join-Path $root '.codex-safedelete') $history
+    $failed = $false
+    try { $null = Restore-SafeDeleteRecord $root $record.id }
+    catch { if ($_.Exception.Message -like 'No recoverable payload exists*') { $failed = $true } else { throw } }
+    Assert-True $failed 'Legacy evidence-free record was claimed restored.'
+    $restored = Restore-SafeDeleteRecord $root
+    Assert-True ($restored.id -eq $previous.id -and [IO.File]::ReadAllText($old) -eq 'older') 'Legacy empty record blocked older undo.'
+    Assert-True (@(Get-SafeDeleteHistory $root)[1].status -eq 'restoring') 'Skipping the legacy record claimed its completion.'
+}
+
+Test-Case 'legacy active payload still restores and gains recovery evidence' {
+    $root = New-Fixture 'legacy-active'
     $file = Join-Path $root 'payload.txt'
     [IO.File]::WriteAllText($file, 'payload')
     $record = Move-SafeDeleteItems $root @($file) 'rm payload.txt'
     $history = @(Get-SafeDeleteHistory $root)
-    $history[0].status = 'pending'
+    $history[0].items[0].PSObject.Properties.Remove('source_fingerprint')
     Write-SDHistory (Join-Path $root '.codex-safedelete') $history
-    [IO.File]::Move($record.items[0].trash_path, $file)
+    $null = Restore-SafeDeleteRecord $root $record.id
+    Assert-True ([IO.File]::ReadAllText($file) -eq 'payload' -and @(Get-SafeDeleteHistory $root)[0].status -eq 'restored') 'A legacy active payload failed to restore.'
+}
+
+Test-Case 'legacy partial restoring preserves existing originals and remaining trash' {
+    $root = New-Fixture 'legacy-partial-restoring'
+    $a = Join-Path $root 'a.txt'; $b = Join-Path $root 'b.txt'
+    [IO.File]::WriteAllText($a, 'first'); [IO.File]::WriteAllText($b, 'second')
+    $record = Move-SafeDeleteItems $root @($a, $b) 'rm a.txt b.txt'
+    $handle = [IO.File]::Open($record.items[1].trash_path, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
+    try {
+        $failed = $false
+        try { $null = Restore-SafeDeleteRecord $root $record.id } catch { $failed = $true }
+        Assert-True $failed 'The second restore move did not fail.'
+    } finally { $handle.Dispose() }
+    $history = @(Get-SafeDeleteHistory $root)
+    foreach ($item in $history[0].items) {
+        $item.PSObject.Properties.Remove('source_fingerprint')
+        $item.PSObject.Properties.Remove('restore_fingerprint')
+    }
+    Write-SDHistory (Join-Path $root '.codex-safedelete') $history
     $failed = $false
-    try { $null = Restore-SafeDeleteRecord $root }
-    catch { if ($_.Exception.Message -like 'No recoverable payload exists*') { $failed = $true } else { throw } }
-    Assert-True $failed 'An empty recovery incorrectly reported success.'
-    Assert-True ([IO.File]::ReadAllText($file) -eq 'payload') 'The original file changed.'
-    Assert-True (@(Get-SafeDeleteHistory $root)[0].status -eq 'pending') 'An empty recovery marked the record restored.'
+    try { $null = Restore-SafeDeleteRecord $root $record.id }
+    catch { if ($_.Exception.Message -like 'Cannot verify previously restored payload; historical content evidence is missing*') { $failed = $true } else { throw } }
+    Assert-True $failed 'An evidence-free partial restore claimed success.'
+    Assert-True ([IO.File]::ReadAllText($a) -eq 'first' -and [IO.File]::ReadAllText($record.items[1].trash_path) -eq 'second' -and -not (Test-Path -LiteralPath $b)) 'Legacy partial restore changed existing originals or remaining trash.'
+    Assert-True (@(Get-SafeDeleteHistory $root)[0].status -eq 'restoring') 'Legacy partial restore changed its durable status.'
+}
+
+Test-Case 'empty pending history is validated before skipping to older undo' {
+    $root = New-Fixture 'empty-pending-tampered-path'
+    $old = Join-Path $root 'older.txt'; $file = Join-Path $root 'pending.txt'
+    [IO.File]::WriteAllText($old, 'older'); [IO.File]::WriteAllText($file, 'pending')
+    $previous = Move-SafeDeleteItems $root @($old) 'rm older.txt'
+    $handle = [IO.File]::Open($file, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
+    try {
+        try { $null = Move-SafeDeleteItems $root @($file) 'rm pending.txt'; throw 'The first move unexpectedly succeeded.' }
+        catch { if ($_.Exception.Message -notlike 'SafeDelete move interrupted*') { throw } }
+    } finally { $handle.Dispose() }
+    $history = @(Get-SafeDeleteHistory $root)
+    $history[1].items[0].trash_path = Join-Path $root 'unrelated-missing.txt'
+    Write-SDHistory (Join-Path $root '.codex-safedelete') $history
+    Expect-Deny { Restore-SafeDeleteRecord $root }
+    Assert-True ([IO.File]::ReadAllText($file) -eq 'pending' -and (Test-Path -LiteralPath $previous.items[0].trash_path)) 'A malformed empty record was skipped before safety checks.'
+}
+
+Test-Case 'final journal retry rejects protected descendants in original tree' {
+    $root = New-Fixture 'final-journal-protected-tree'
+    $folder = Join-Path $root 'folder'
+    $null = [IO.Directory]::CreateDirectory($folder)
+    [IO.File]::WriteAllText((Join-Path $folder 'safe.txt'), 'safe')
+    $record = Move-SafeDeleteItems $root @($folder) 'rm folder'
+    Invoke-FinalJournalFault $root $record
+    [IO.File]::WriteAllText((Join-Path $folder '.env'), 'injected')
+    Expect-Deny { Restore-SafeDeleteRecord $root $record.id }
+    Assert-True ([IO.File]::ReadAllText((Join-Path $folder 'safe.txt')) -eq 'safe' -and @(Get-SafeDeleteHistory $root)[0].status -eq 'restoring') 'A protected original tree was claimed restored or changed.'
 }
 
 Test-Case 'junction target and parent are denied' {

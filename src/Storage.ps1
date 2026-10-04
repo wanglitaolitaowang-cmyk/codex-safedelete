@@ -160,7 +160,7 @@ function Read-SDHistory {
     $ids = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
     foreach ($record in $records) {
         if ($null -eq $record -or $record.id -notmatch '^[a-f0-9]{32}$' -or
-            $record.status -notin @('pending', 'active', 'restoring', 'restored') -or
+            $record.status -notin @('pending', 'active', 'restoring', 'restored', 'cancelled') -or
             $null -eq $record.items -or @($record.items).Count -eq 0 -or @($record.items).Count -gt 1000) {
             throw 'SafeDelete history contains an invalid record.'
         }
@@ -233,6 +233,52 @@ function Move-SDItem {
     else { [IO.File]::Move($Source, $Destination) }
 }
 
+function Get-SDPayloadFingerprint {
+    param([string]$Path, [string]$OriginalPath, [string]$Type, [ref]$Nodes)
+    $payload = Get-SDItem $Path
+    if (($payload.PSIsContainer -and $Type -ne 'directory') -or
+        (-not $payload.PSIsContainer -and $Type -ne 'file')) { throw 'DENY: payload type does not match history.' }
+    $entries = New-Object 'System.Collections.Generic.List[string]'
+    $stack = New-Object 'System.Collections.Generic.Stack[string]'
+    $stack.Push($Path)
+    while ($stack.Count -gt 0) {
+        $part = $stack.Pop()
+        Assert-SDNoReparse $part
+        $relative = ''
+        if ($part -ne $Path) {
+            $relative = $part.Substring($Path.Length + 1)
+            Assert-SDProtectedPath (Join-Path $OriginalPath $relative)
+        }
+        $childItem = Get-SDItem $part
+        $Nodes.Value++
+        if ($Nodes.Value -gt 1000) { throw 'DENY: payload contains more than 1000 nodes.' }
+        # Length-prefix names and sort ordinally so empty directories, node types,
+        # and every file's full contents contribute to a stable tree fingerprint.
+        $key = $relative.Length.ToString() + ':' + $relative
+        if ($childItem.PSIsContainer) {
+            $entries.Add('D:' + $key)
+            foreach ($child in [IO.Directory]::EnumerateFileSystemEntries($part)) {
+                $stack.Push($child)
+                if ($Nodes.Value + $stack.Count -gt 1000) { throw 'DENY: payload contains more than 1000 nodes.' }
+            }
+        } else {
+            # .cmd invokes Windows PowerShell even from PowerShell 7, whose inherited
+            # PSModulePath can prevent Get-FileHash from loading. Use .NET directly.
+            $stream = [IO.File]::OpenRead($part)
+            $fileSha = [Security.Cryptography.SHA256]::Create()
+            try { $hash = ([BitConverter]::ToString($fileSha.ComputeHash($stream))).Replace('-', '') }
+            finally { $fileSha.Dispose(); $stream.Dispose() }
+            $entries.Add('F:' + $key + ':' + $childItem.Length.ToString() + ':' + $hash)
+        }
+    }
+    $ordered = $entries.ToArray()
+    [Array]::Sort($ordered, [StringComparer]::Ordinal)
+    $bytes = (New-Object Text.UTF8Encoding($false)).GetBytes(($ordered -join "`n"))
+    $sha = [Security.Cryptography.SHA256]::Create()
+    try { return ([BitConverter]::ToString($sha.ComputeHash($bytes))).Replace('-', '') }
+    finally { $sha.Dispose() }
+}
+
 function Move-SafeDeleteItems {
     param(
         [Parameter(Mandatory = $true)][string]$ProjectRoot,
@@ -256,13 +302,16 @@ function Move-SafeDeleteItems {
         Assert-SDNoReparse $batch
         $null = [IO.Directory]::CreateDirectory($batch)
         $items = @()
+        $fingerprintNodes = 0
         for ($i = 0; $i -lt $targets.Count; $i++) {
             $item = Get-SDItem $targets[$i]
+            $type = $(if ($item.PSIsContainer) { 'directory' } else { 'file' })
             $items += [pscustomobject]@{
                 original_path = $targets[$i]
                 name = $item.Name
                 trash_path = Join-Path $batch ($i.ToString() + '-' + $item.Name)
-                type = $(if ($item.PSIsContainer) { 'directory' } else { 'file' })
+                type = $type
+                source_fingerprint = Get-SDPayloadFingerprint $targets[$i] $targets[$i] $type ([ref]$fingerprintNodes)
             }
         }
         $record = [pscustomobject]@{
@@ -292,75 +341,97 @@ function Restore-SafeDeleteRecord {
         if ($Id) {
             $matches = @($history | Where-Object { $_.id -eq $Id })
             if ($matches.Count -ne 1) { throw "SafeDelete record not found or duplicated: $Id" }
-            $record = $matches[0]
+            $available = $matches
         } else {
             $available = @($history | Where-Object { $_.status -in @('pending', 'active', 'restoring') })
             if ($available.Count -eq 0) { throw 'No deletion to undo.' }
-            $record = $available[-1]
         }
-        if ($record.status -eq 'restored') { throw "Record already restored: $($record.id)" }
-        $restore = @()
-        $originals = @()
-        $batch = Join-Path (Join-Path $store 'trash') $record.id
-        $index = 0
-        $payloadNodes = 0
-        foreach ($item in @($record.items)) {
-            if ($null -eq $item -or $item.type -notin @('file', 'directory') -or
-                -not ($item.original_path -is [string]) -or -not ($item.trash_path -is [string])) {
-                throw 'DENY: invalid item in history.'
-            }
-            $original = Get-SDAbsolutePath $item.original_path
-            Assert-SDTarget $original $root
-            $name = [IO.Path]::GetFileName($original)
-            $expected = Join-Path $batch ($index.ToString() + '-' + $name)
-            $trash = Get-SDAbsolutePath $item.trash_path
-            if ($trash -ne $expected -or $item.name -ne $name) { throw 'DENY: history contains an invalid trash path or name.' }
-            Assert-SDNoReparse $trash
-            $originals += $original
-            if (Test-SDExists $trash) {
-                if (Test-SDExists $original) { throw "Restore conflict; original path already exists: $original" }
-                $payload = Get-SDItem $trash
-                if (($payload.PSIsContainer -and $item.type -ne 'directory') -or
-                    (-not $payload.PSIsContainer -and $item.type -ne 'file')) { throw 'DENY: trash item type does not match history.' }
-                # Validate the entire payload again: trash might have changed since deletion.
-                $stack = New-Object 'System.Collections.Generic.Stack[string]'
-                $stack.Push($trash)
-                while ($stack.Count -gt 0) {
-                    $part = $stack.Pop()
-                    Assert-SDNoReparse $part
-                    if ($part -ne $trash) {
-                        $relative = $part.Substring($trash.Length + 1)
-                        Assert-SDProtectedPath (Join-Path $original $relative)
-                    }
-                    $childItem = Get-SDItem $part
-                    $payloadNodes++
-                    if ($payloadNodes -gt 1000) { throw 'DENY: trash payload contains more than 1000 nodes.' }
-                    if ($childItem.PSIsContainer) {
-                        foreach ($child in [IO.Directory]::EnumerateFileSystemEntries($part)) {
-                            $stack.Push($child)
-                            if ($payloadNodes + $stack.Count -gt 1000) { throw 'DENY: trash payload contains more than 1000 nodes.' }
-                        }
+        for ($candidate = $available.Count - 1; $candidate -ge 0; $candidate--) {
+            $record = $available[$candidate]
+            if ($record.status -eq 'restored') { throw "Record already restored: $($record.id)" }
+            if ($record.status -eq 'cancelled') { throw "Record cancelled; no files were restored: $($record.id)" }
+            $restore = @()
+            $originals = @()
+            $fingerprints = @()
+            $verifiedOriginals = $true
+            $batch = Join-Path (Join-Path $store 'trash') $record.id
+            $index = 0
+            $payloadNodes = 0
+            foreach ($item in @($record.items)) {
+                if ($null -eq $item -or $item.type -notin @('file', 'directory') -or
+                    -not ($item.original_path -is [string]) -or -not ($item.trash_path -is [string])) {
+                    throw 'DENY: invalid item in history.'
+                }
+                $original = Get-SDAbsolutePath $item.original_path
+                Assert-SDTarget $original $root
+                $name = [IO.Path]::GetFileName($original)
+                $expected = Join-Path $batch ($index.ToString() + '-' + $name)
+                $trash = Get-SDAbsolutePath $item.trash_path
+                if ($trash -ne $expected -or $item.name -ne $name) { throw 'DENY: history contains an invalid trash path or name.' }
+                Assert-SDNoReparse $trash
+                foreach ($field in @('source_fingerprint', 'restore_fingerprint')) {
+                    $proof = $item.PSObject.Properties[$field]
+                    if ($null -ne $proof -and (-not ($proof.Value -is [string]) -or $proof.Value -notmatch '^[A-Fa-f0-9]{64}$')) {
+                        throw 'DENY: history contains an invalid payload fingerprint.'
                     }
                 }
-                $restore += $item
-            } elseif ($record.status -eq 'active' -or -not (Test-SDExists $original)) {
-                throw "Missing recoverable payload: $trash"
+                $originals += $original
+                if (Test-SDExists $trash) {
+                    if (Test-SDExists $original) { throw "Restore conflict; original path already exists: $original" }
+                    # Validate the entire payload again: trash might have changed since deletion.
+                    $fingerprints += Get-SDPayloadFingerprint $trash $original $item.type ([ref]$payloadNodes)
+                    $restore += $item
+                } else {
+                    if ($record.status -eq 'active' -or -not (Test-SDExists $original)) {
+                        throw "Missing recoverable payload: $trash"
+                    }
+                    $fingerprint = Get-SDPayloadFingerprint $original $original $item.type ([ref]$payloadNodes)
+                    $fingerprints += $fingerprint
+                    $field = $(if ($record.status -eq 'restoring') { 'restore_fingerprint' } else { 'source_fingerprint' })
+                    $proof = $item.PSObject.Properties[$field]
+                    if ($null -eq $proof) { $verifiedOriginals = $false }
+                    elseif ($fingerprint -ne $proof.Value) { throw "Restore conflict; original payload does not match recovery evidence: $original" }
+                }
+                $index++
             }
-            $index++
+            Assert-SDNoOverlap $originals
+            if ($restore.Count -eq 0) {
+                if ($verifiedOriginals -and $record.status -eq 'restoring') {
+                    # All moves finished; only the durable terminal journal write failed.
+                    $record.status = 'restored'
+                    Write-SDHistory $store $history
+                    return $record
+                }
+                if ($verifiedOriginals -and $record.status -eq 'pending') {
+                    $record.status = 'cancelled'
+                    Write-SDHistory $store $history
+                    if ($Id) { throw "Record cancelled; no files were restored: $($record.id)" }
+                } elseif ($Id) {
+                    throw "No recoverable payload exists; original payload cannot be verified for record: $($record.id)"
+                }
+                # Legacy empty records have no proof of completed moves. Preserve their
+                # status, make no restoration claim, and let undo reach an older record.
+                continue
+            }
+            if ($record.status -eq 'restoring' -and -not $verifiedOriginals) {
+                throw "Cannot verify previously restored payload; historical content evidence is missing for record $($record.id). Remaining trash is preserved; verify the original paths before recovering it manually."
+            }
+            for ($i = 0; $i -lt @($record.items).Count; $i++) {
+                $record.items[$i] | Add-Member -NotePropertyName restore_fingerprint -NotePropertyValue $fingerprints[$i] -Force
+            }
+            $record.status = 'restoring'
+            Write-SDHistory $store $history
+            foreach ($item in $restore) {
+                $parent = [IO.Path]::GetDirectoryName($item.original_path)
+                Assert-SDNoReparse $parent
+                $null = [IO.Directory]::CreateDirectory($parent)
+                if (Test-SDExists $item.original_path) { throw "Restore conflict; original path already exists: $($item.original_path)" }
+                Move-SDItem $item.trash_path $item.original_path $item.type
+            }
+            $record.status = 'restored'
+            Write-SDHistory $store $history
+            return $record
         }
-        Assert-SDNoOverlap $originals
-        if ($restore.Count -eq 0) { throw "No recoverable payload exists for record: $($record.id)" }
-        $record.status = 'restoring'
-        Write-SDHistory $store $history
-        foreach ($item in $restore) {
-            $parent = [IO.Path]::GetDirectoryName($item.original_path)
-            Assert-SDNoReparse $parent
-            $null = [IO.Directory]::CreateDirectory($parent)
-            if (Test-SDExists $item.original_path) { throw "Restore conflict; original path already exists: $($item.original_path)" }
-            Move-SDItem $item.trash_path $item.original_path $item.type
-        }
-        $record.status = 'restored'
-        Write-SDHistory $store $history
-        return $record
+        throw 'No deletion to undo. Empty interrupted records have no verified recoverable payload.'
     } finally { $lock.Dispose() }
 }

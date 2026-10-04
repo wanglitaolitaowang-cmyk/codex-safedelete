@@ -110,6 +110,10 @@ try {
     Write-Output "`nRestart Codex and open a new terminal. In Codex /hooks, confirm SafeDelete is enabled and trusted."
 } catch {
     $failure = $_
+    # Persist the uncertain phase before restoring anything. A failed rollback or
+    # final state write must never leave a state that permits normal uninstall.
+    $state.phase = 'rolling-back'
+    Write-SafeDeleteJson $statePath $state
     Restore-SafeDeleteConfiguration -State $state -InstallDir $InstallDir
     $state.phase = 'rolled-back'
     Write-SafeDeleteJson $statePath $state

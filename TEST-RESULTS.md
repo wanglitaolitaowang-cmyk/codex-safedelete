@@ -3,6 +3,61 @@
 Tested locally on **2026-10-04 (UTC+08:00)**. Windows build 22631 (23H2),
 Codex CLI **0.160.0**, Git 2.55.0. Production code uses PowerShell and .NET only.
 
+## Release repairs and compatibility — 2026-10-04
+
+The final repair run passed **171/171 checks**, with no skips. It used Windows
+build 22631, a non-administrator process, Windows PowerShell **5.1.22621.5909**
+and PowerShell **7.6.5**.
+
+| Verification | Result |
+| --- | --- |
+| Acceptance, including rollback cleanup and real Hook timeout/reinstall | 37/37 PASS in each PowerShell version |
+| Pause/resume and installation lifecycle | 27/27 PASS in each version |
+| Storage faults, interrupted journal writes and recovery conflicts | 19/19 PASS in each version |
+| PS 5.1 → 7 and 7 → 5.1 recovery; unreadable-file refusal | 3/3 PASS |
+| Installed `.cmd` delete/undo under Windows code pages 936 and 65001 | 2/2 PASS |
+
+Rollback cleanup now removes only the installation files. Existing and newly
+created Codex configuration, hooks and PATH changes made after rollback remain
+untouched. A failed rollback state write leaves an incomplete state that refuses
+uninstallation. A real 10-second Hook verification timeout was followed by
+cleanup, reinstallation and exact configuration restoration in both shells.
+
+Zero-move records are cancelled without claiming a restore and do not block an
+older deletion's undo. A final journal write failure can finish on retry only
+after full file/tree content verification. Tests reject same-length content
+replacement, removed empty directories, missing active payloads, injected
+sensitive paths and invalid history. Legacy interrupted records without enough
+content evidence remain preserved for manual inspection.
+
+The first repair run retained a **FAIL**: PowerShell 7's installed `.cmd` →
+Windows PowerShell child could not load `Get-FileHash`. File fingerprints now use
+.NET streaming SHA256. Both installed-command paths passed the complete rerun.
+Cross-runtime and code-page tests also checked restored binary bytes, empty
+directories, and names containing Chinese, spaces, apostrophes and an emoji.
+An unreadable source file left the original, older history and older trash intact.
+
+The four final JSONL files were completely parsed: **128 PASS rows**, zero parse
+errors. All 43 cases in the four storage/compatibility reports were also parsed
+and passed. **43 source-hash comparisons** matched the current code. The installed
+global protection was restored to **ON**; global Codex configuration/hooks and
+User PATH hashes/values remained unchanged.
+
+Local evidence (ignored by Git):
+
+- Final six-suite run: `tests/.work/release-fixes-20261004-191258-67497d65/verification.json`
+- Earlier run with the retained module-loading failure: `tests/.work/release-fixes-20261004-190411-43f107d5/verification.json`
+- Cross-runtime compatibility: `tests/.work/release-fix-compatibility/compatibility-20261004-111351-fe7623d3/report.json`
+- Code pages: `tests/.work/codepage-compatibility-20261004-191557-b60cd8c3/report.json`
+
+Reproducible scripts are `tests/acceptance.ps1`, `tests/protection.ps1`,
+`tests/storage-faults.ps1`, `tests/compatibility.ps1` and `tests/codepages.ps1`.
+Run code-page tests from a separate Windows console so `chcp` has a real console.
+All installers in these tests use isolated Codex homes and `-NoPathUpdate`.
+This repair batch did not repeat the full Desktop GUI restart sequence; the
+earlier Desktop results below remain historical. A separate Windows 10 machine,
+other Codex versions and other antivirus products have not been verified.
+
 ## Pause and resume protection
 
 The new installation-wide `protection-state.json` switch is read by the Hook

@@ -14,9 +14,9 @@ if not "%safedelete_exit%"=="0" goto failed
 echo.
 echo Codex SafeDelete removed successfully.
 echo.
-echo [OK] Codex configuration restored
-echo [OK] PATH restored
-echo [OK] No SafeDelete configuration remains
+echo [OK] SafeDelete installation files removed
+echo [OK] Existing recovery files preserved
+echo See the configuration and PATH result above.
 goto finish
 :unsupported
 echo Windows PowerShell 5.1 is required. Run this file on Windows 10 or 11.
