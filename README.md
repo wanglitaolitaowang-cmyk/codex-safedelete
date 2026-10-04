@@ -32,7 +32,7 @@ MIT licensed.
 | --- | --- |
 | PowerShell 5.1 / 7 on Windows build 22631 (23H2) | Verified; a separate Windows 10 machine has not been tested |
 | Codex CLI 0.160.0 with a local `codex.exe` | Real Hook → trash → undo → uninstall verified |
-| Codex Desktop 26.930.3930.0 | Delete/undo previously verified; full E2E retest pending after the narrow uninstall fix |
+| Codex Desktop 26.930.3930.0 | Real install, full restart, deletion interception, undo and default uninstall verified |
 
 Download the project and run the install command above in its folder.
 

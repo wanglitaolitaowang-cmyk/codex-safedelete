@@ -13,44 +13,41 @@ Codex CLI **0.160.0**, Git 2.55.0. Production code uses PowerShell and .NET only
 | Real Codex install → hooks → safe delete → undo → uninstall | Codex 0.160.0 / Windows PowerShell | PASS |
 | Desktop deletion and recovery | Windows Codex Desktop 26.930.3930.0 | PASS: file and recursive directory deletion intercepted; both restored with original bytes |
 | Desktop danger commands | Windows Codex Desktop 26.930.3930.0 | 5/5 DENY; fixture bytes unchanged |
-| Desktop E2E release gate | Windows Codex Desktop 26.930.3930.0 | Retest pending after the narrow uninstall fix; previous default-uninstall run FAIL |
+| Desktop E2E release gate | Windows Codex Desktop 26.930.3930.0 | PASS: real install, full restart, file/directory recovery, danger DENY and default uninstall; no manual merge |
 
-The Desktop review used the real default user installation. `install.ps1`
-exited 0, registered an enabled/trusted Hook and passed its runtime check.
-The operator completely exited and reopened Desktop. All 11 prior Desktop
-processes were gone; the resumed agent then issued the actual deletion commands.
-Original configuration and User PATH checksums were saved locally.
+The latest Desktop run used the real default user installation on package
+**26.930.3930.0**. `install.ps1` exited 0 and verified an enabled/trusted
+Hook. The operator fully exited and reopened Desktop. All 13 prior Desktop
+processes and both prior Desktop backend processes were gone. Tests resumed
+in this actual Desktop session, using only synthetic local fixtures.
 
-The real Desktop agent ran `Remove-Item` against a synthetic `test.txt`, then
-`Remove-Item -Recurse -Force` against a synthetic directory containing two files
-at different depths. The Hook replaced both commands with SafeDelete, the
-original paths disappeared and all original bytes remained in recoverable
-trash. Actual `safedelete undo` commands restored both at their original paths;
-history marked both records restored and the trash payloads were gone.
+Actual `Remove-Item` file deletion and `Remove-Item -Recurse -Force` directory
+deletion were intercepted. Original paths disappeared and all original
+bytes remained in recoverable trash. Actual `safedelete undo` restored
+both at their original locations, including files at two directory depths;
+the records became restored and the trash payloads were gone.
 
-Actual Desktop commands `Remove-Item -Recurse -Force .`, deletion of `.git`,
+Actual commands `Remove-Item -Recurse -Force .`, deletion of `.git`,
 deletion of `.env`, `git clean -fd` and `git reset --hard` were each rejected
-by the PreToolUse Hook. All synthetic fixture bytes remained unchanged.
-Tests used only local fixtures, including a synthetic `.git`; no real project
-metadata or user files were selected for deletion.
+by the PreToolUse Hook. All five fixture files retained their original bytes.
+The `.git` fixture was synthetic; real repository metadata was never selected.
 
-Desktop restart changed its `SKY_CUA_NATIVE_PIPE_DIRECTORY` MCP configuration
-value. A full TOML comparison found this was the only change unrelated to
-SafeDelete. Replacing that one value in a local candidate reproduced the exact
-installed configuration hash. The actual independent PowerShell uninstall exited 1.
-It refused the changed configuration and left it untouched. Agent invocation
-of `uninstall.ps1` was also denied by the documented opaque-script rule.
-After a reviewed merge of that one Desktop-generated value, the unchanged
-uninstaller exited 0. Original `config.toml` bytes and User PATH matched
-their pre-install checksums; the newly created `hooks.json` and installation
-directory were absent. Project recovery history was retained.
-That initial Desktop E2E was FAIL because default uninstall required a manual
-merge. The authorized fix changes only `uninstall.ps1` and `src/InstallState.ps1`:
-a unique single-line MCP pipe value may rotate only between valid
-`codex-computer-use` GUID named pipes, and restoring just that value in memory
-must reproduce the exact installed SHA-256. Ambiguous TOML, other bytes,
-Hook/PATH changes and corrupt backups remain rejected. Deletion, storage,
-restore and Hook code are unchanged. A new real Desktop run remains pending.
+Desktop restart really changed its `SKY_CUA_NATIVE_PIPE_DIRECTORY` value:
+the complete configuration hash differed from the installed hash. Without
+a manual configuration merge or any stored-hash edit, the ordinary
+`uninstall.ps1` exited 0 in an independent local PowerShell process. Original
+`config.toml` bytes and User PATH matched their pre-install checksums.
+The new `hooks.json` and installation directory were absent. Project
+recovery history remained. The complete Desktop E2E is **PASS**.
+
+The initial release gate failed because Desktop pipe rotation triggered
+the old exact-hash guard; that failed result and manual cleanup remain in
+local evidence. The explicitly authorized fix changes only `uninstall.ps1`
+and `src/InstallState.ps1`. It accepts a unique single-line MCP pipe value
+rotating between valid `codex-computer-use` GUID named pipes only when
+restoring just that value in memory reproduces the full installed SHA-256.
+Other bytes, ambiguous TOML, Hook/PATH changes and corrupt backups remain
+rejected. Deletion, storage, restore and Hook code are unchanged.
 
 The new regression runs passed all 33 cases in both PowerShell versions. Three
 additional cases cover valid rotations with UTF-8/BOM/line endings, 16 refused
@@ -132,7 +129,9 @@ Final local evidence (ignored by Git; full output stays on this machine):
 - `work/desktop-final/folder-delete.json` and `folder-undo.json`
 - `work/desktop-final/danger-commands.json`
 - `work/desktop-final/config-change.json` (private configuration snapshots are also ignored)
-- `work/desktop-final/uninstall-result.json` and `report.json`
+- `work/desktop-final/uninstall-result.json` and `report.json` (initial failed gate)
+- `work/desktop-fixed/install.json`, `restart.json`, file/folder delete and undo reports
+- `work/desktop-fixed/danger-commands.json`, `uninstall.json` and `report.json` (final PASS)
 
 To repeat:
 
