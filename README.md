@@ -1,10 +1,22 @@
 # Codex SafeDelete
 
-Stop AI coding agents from permanently deleting your files.
+Local delete protection and one-command recovery for Codex on Windows.
 
-Dangerous delete commands are intercepted and made recoverable.
+Recognized delete commands are intercepted and moved to recoverable local
+trash. `safedelete undo` restores successfully saved files and directories.
 
-## Install
+![Codex SafeDelete terminal demo](assets/demo.gif)
+
+Chinese captions explain actual delete-and-restore results from an isolated
+Codex CLI run with a fixed local model fixture. Commands and output are
+excerpted; startup delays are compressed.
+
+**Local only.** No account, cloud upload or background service.
+**Protection scope:** recognized deletes; this Hook does not provide OS-level isolation.
+
+## Quick Start
+
+### Install
 
 Double-click:
 
@@ -14,13 +26,13 @@ Install SafeDelete.cmd
 
 Reopen Codex and your terminal once. That's it.
 
-## Accidentally deleted something?
+### Accidentally deleted something?
 
 ```powershell
 safedelete undo
 ```
 
-## Temporarily disable protection
+### Pause protection
 
 Double-click **`Pause SafeDelete.cmd`**, or run:
 
@@ -31,7 +43,7 @@ safedelete off
 **Warning:** Codex can delete files permanently while protection is OFF.
 Previously saved trash and history remain available.
 
-## Enable protection again
+### Resume protection
 
 Double-click **`Resume SafeDelete.cmd`**, or run:
 
