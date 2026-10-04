@@ -21,20 +21,107 @@ function Get-SafeDeleteCommandName {
     ($name -replace '\.(exe|cmd|bat)$', '').ToLowerInvariant()
 }
 
+function Get-SafeDeleteShellKind {
+    param([string]$Shell)
+    # Windows Codex's tool name "Bash" is a shell-tool abstraction. Only an
+    # explicit shell executable changes the default Windows PowerShell dialect.
+    if ([string]::IsNullOrWhiteSpace($Shell)) { return 'powershell' }
+    $name = ($Shell.Trim().Trim([char[]]@('"', "'")) -split '[\\/]')[-1]
+    $name = ($name -replace '\.exe$', '').ToLowerInvariant()
+    if ($name -in @('powershell', 'pwsh')) { return 'powershell' }
+    if ($name -in @('bash', 'sh')) { return 'posix' }
+    if ($name -in @('cmd', 'wsl')) { return $name }
+    return 'unsupported'
+}
+
+function Get-SafeDeleteNonPowerShellPlan {
+    param([string]$Command, [string]$WorkingDirectory, [string]$ProjectRoot, [string]$Shell, [int]$Depth)
+    if ($Depth -gt 4) { return New-SafeDeletePlan deny 'Too many nested shells.' }
+    $scope = 'Automatic deletion recovery supports Windows PowerShell only. Use PowerShell or safedelete delete with explicit Windows paths.'
+    # This deliberately small grammar admits common literal non-deletion work.
+    # It does not reinterpret POSIX escapes/paths using a PowerShell AST.
+    if ($Command -match '[;&|<>`$()%!^\\\r\n]') {
+        return New-SafeDeletePlan deny ('Complex or dynamic non-PowerShell syntax cannot be checked. ' + $scope)
+    }
+    $words = New-Object 'System.Collections.Generic.List[string]'
+    $offset = 0
+    while ($offset -lt $Command.Length -and $Command.Substring($offset).Trim().Length -gt 0) {
+        $match = [regex]::Match($Command.Substring($offset), '^\s*(?:''(?<single>[^'']*)''|"(?<double>[^"]*)"|(?<bare>[A-Za-z0-9_./:=,@+-]+))(?=\s|$)')
+        if (-not $match.Success -or ($words.Count -eq 0 -and -not $match.Groups['bare'].Success)) {
+            return New-SafeDeletePlan deny ('Quoted, escaped or opaque command names and unsupported arguments cannot be checked. ' + $scope)
+        }
+        if ($match.Groups['single'].Success) { $words.Add($match.Groups['single'].Value) }
+        elseif ($match.Groups['double'].Success) { $words.Add($match.Groups['double'].Value) }
+        else { $words.Add($match.Groups['bare'].Value) }
+        $offset += $match.Length
+    }
+    if ($words.Count -eq 0 -or $words[0] -notmatch '^[A-Za-z][A-Za-z0-9_.-]*$') {
+        return New-SafeDeletePlan deny ('An explicit simple command name is required. ' + $scope)
+    }
+    $name = ($words[0] -replace '\.(exe|cmd|bat)$', '').ToLowerInvariant()
+    if ($name -in @('rm', 'del', 'erase', 'rmdir', 'rd', 'remove-item', 'ri')) {
+        return New-SafeDeletePlan deny ('Deletion in this shell is blocked. ' + $scope)
+    }
+    if ($name -eq 'echo' -or
+        ($name -eq 'git' -and $words.Count -ge 2 -and $words[1] -eq 'status') -or
+        ($name -eq 'npm' -and $words.Count -ge 2 -and $words[1] -eq 'test') -or
+        ($name -in @('git', 'npm') -and $words.Count -eq 2 -and $words[1] -eq '--version')) {
+        return New-SafeDeletePlan allow 'A simple literal non-deletion command is allowed in this shell.'
+    }
+    if ($name -in @('bash', 'sh', 'cmd', 'wsl')) {
+        $flag = -1
+        for ($i = 1; $i -lt $words.Count; $i++) {
+            if (($name -eq 'cmd' -and $words[$i] -eq '/c') -or
+                ($name -in @('bash', 'sh') -and $words[$i] -match '^-[el]*c[el]*$') -or
+                ($name -eq 'wsl' -and $words[$i] -in @('-e', '--exec', '--'))) { $flag = $i; break }
+            if (($name -in @('bash', 'sh') -and $words[$i] -in @('-e', '-l', '-f', '--noprofile', '--norc')) -or
+                ($name -eq 'cmd' -and $words[$i] -in @('/d', '/s', '/q', '/a', '/u', '/v:on', '/v:off', '/e:on', '/e:off'))) { continue }
+            return New-SafeDeletePlan deny ('Unsupported shell startup arguments cannot be checked. ' + $scope)
+        }
+        if ($flag -ge 0 -and $flag + 1 -lt $words.Count) {
+            if ($name -in @('bash', 'sh') -and $words.Count -ne $flag + 2) {
+                return New-SafeDeletePlan deny ('Extra shell command arguments cannot be checked. ' + $scope)
+            }
+            $inner = ($words.ToArray()[($flag + 1)..($words.Count - 1)] -join ' ')
+            return Get-SafeDeleteCommandPlan -Command $inner -WorkingDirectory $WorkingDirectory -ProjectRoot $ProjectRoot -Depth ($Depth + 1) -Shell $name
+        }
+    }
+    return New-SafeDeletePlan deny ('Only simple literal git status, npm test and echo commands are supported in this shell. ' + $scope)
+}
+
 function Get-SafeDeleteCommandPlan {
     param([Parameter(Mandatory)][string]$Command,
           [Parameter(Mandatory)][string]$WorkingDirectory,
           [Parameter(Mandatory)][string]$ProjectRoot,
-          [int]$Depth = 0)
+          [int]$Depth = 0,
+          [string]$Shell = '')
     if ($Depth -gt 4) { return New-SafeDeletePlan deny 'Too many nested shells.' }
+    $hasShellMetadata = -not [string]::IsNullOrWhiteSpace($Shell)
+    $shellKind = Get-SafeDeleteShellKind $Shell
+    if ($shellKind -eq 'unsupported') { return New-SafeDeletePlan deny 'Unsupported shell. Use Windows PowerShell for automatic deletion recovery.' }
+    if ($shellKind -ne 'powershell') {
+        return Get-SafeDeleteNonPowerShellPlan $Command $WorkingDirectory $ProjectRoot $Shell $Depth
+    }
     $tokens = $null; $parseErrors = $null
     $ast = [System.Management.Automation.Language.Parser]::ParseInput($Command, [ref]$tokens, [ref]$parseErrors)
+    if (-not $hasShellMetadata -and $parseErrors.Count -gt 0 -and $Command -match '(?m)(?:^|[;&|])\s*["'']') {
+        return New-SafeDeletePlan deny 'A quoted command name cannot be checked without explicit shell metadata. Use an explicit Windows PowerShell shell.'
+    }
     $commands = @($ast.FindAll({ param($a) $a -is [System.Management.Automation.Language.CommandAst] }, $true))
     $danger = @(); $wrappers = @()
     foreach ($c in $commands) {
+        $rawName = $c.GetCommandName()
+        if (-not $hasShellMetadata -and $rawName -and $rawName.Contains('\') -and
+            $rawName -notmatch '^(?:[A-Za-z]:[\\/]|\\\\[^\\]+\\[^\\]+)' -and
+            $c.InvocationOperator -ne [System.Management.Automation.Language.TokenKind]::Ampersand) {
+            return New-SafeDeletePlan deny 'An escaped or relative command name cannot be checked without explicit shell metadata. Use an absolute Windows executable or explicit Windows PowerShell shell.'
+        }
         $n = Get-SafeDeleteCommandName $c
         if (-not $n -or $n -in @('invoke-expression', 'iex', 'eval')) {
             return New-SafeDeletePlan deny 'Dynamic command execution cannot be checked. Use literal commands.'
+        }
+        if (-not $hasShellMetadata -and $n -in @('rm', 'del', 'erase', 'rmdir', 'rd')) {
+            return New-SafeDeletePlan deny 'The shell for this deletion alias is not specified. Use Remove-Item, an explicit powershell/pwsh wrapper, or explicit PowerShell shell metadata.'
         }
         if ($n -in @('rm', 'del', 'erase', 'rmdir', 'rd', 'remove-item', 'ri')) { $danger += $c }
         if ($n -eq 'git') {
@@ -72,22 +159,49 @@ function Get-SafeDeleteCommandPlan {
     foreach ($wrapper in $wrappers) {
         $n = Get-SafeDeleteCommandName $wrapper
         $e = @($wrapper.CommandElements)
-        if ($wrapper.Extent.Text -match '(?i)\s-(?:file|f)\s') {
-            return New-SafeDeletePlan deny 'Shell script execution cannot be checked safely. Use explicit commands.'
-        }
-        if ($wrapper.Extent.Text -match '(?i)\s-(?:e|en|enc|enco|encod|encode|encoded|encodedcommand)\b') {
-            return New-SafeDeletePlan deny 'Encoded shell commands cannot be checked.'
-        }
         $flag = -1
+        $noProfile = $false
         for ($i = 1; $i -lt $e.Count; $i++) {
             $word = $e[$i].Extent.Text.Trim('"', "'").ToLowerInvariant()
-            if (($n -eq 'cmd' -and $word -in @('/c','/k')) -or ($n -in @('powershell','pwsh') -and $word -match '^-(c|co|com|comm|comma|comman|command)$') -or ($n -in @('bash','sh','wsl') -and $word -match '^-(c|lc|cl)$')) { $flag = $i; break }
+            if ($n -in @('powershell', 'pwsh')) {
+                if ($e[$i] -is [System.Management.Automation.Language.CommandParameterAst]) {
+                    if ($e[$i].Argument) { return New-SafeDeletePlan deny 'Attached or dynamic PowerShell startup arguments cannot be checked.' }
+                } else {
+                    try { $word = (Get-SafeDeleteLiteral $e[$i]).ToLowerInvariant() }
+                    catch { return New-SafeDeletePlan deny 'Dynamic PowerShell startup arguments cannot be checked.' }
+                }
+                if (-not $word.StartsWith('-') -or $word.Length -lt 2) { return New-SafeDeletePlan deny 'Unsupported PowerShell startup arguments cannot be checked.' }
+                $parameter = $word.Substring(1)
+                if ('encodedcommand'.StartsWith($parameter) -or 'encodedarguments'.StartsWith($parameter) -or $parameter -eq 'ec') {
+                    return New-SafeDeletePlan deny 'Encoded PowerShell commands cannot be checked.'
+                }
+                if ('file'.StartsWith($parameter)) { return New-SafeDeletePlan deny 'PowerShell script execution cannot be checked safely. Use explicit commands.' }
+                if ('workingdirectory'.StartsWith($parameter) -or $parameter -eq 'wd') { return New-SafeDeletePlan deny 'PowerShell startup directory changes cannot be recovered safely. Set the tool workdir instead.' }
+                if ($word -match '^-(c|co|com|comm|comma|comman|command)$') { $flag = $i; break }
+                if ($word -in @('-noprofile', '-nop')) { $noProfile = $true; continue }
+                if ($word -in @('-nologo', '-noninteractive', '-sta', '-mta')) { continue }
+                if ($word -eq '-executionpolicy' -and $i + 1 -lt $e.Count) {
+                    try { $policy = Get-SafeDeleteLiteral $e[$i + 1] } catch { return New-SafeDeletePlan deny 'Dynamic PowerShell startup arguments cannot be checked.' }
+                    if ($policy -notin @('Bypass','RemoteSigned','Unrestricted','Restricted','AllSigned','Default','Undefined')) { return New-SafeDeletePlan deny 'Unsupported PowerShell execution policy.' }
+                    $i++; continue
+                }
+                return New-SafeDeletePlan deny 'Unsupported PowerShell startup arguments cannot be checked. Use -NoProfile -Command with literal commands.'
+            }
+            if (($n -eq 'cmd' -and $word -eq '/c') -or
+                ($n -in @('bash','sh') -and $word -match '^-[el]*c[el]*$') -or
+                ($n -eq 'wsl' -and $word -in @('-e', '--exec', '--'))) { $flag = $i; break }
+            if (($n -in @('bash', 'sh') -and $word -in @('-e', '-l', '-f', '--noprofile', '--norc')) -or
+                ($n -eq 'cmd' -and $word -in @('/d', '/s', '/q', '/a', '/u', '/v:on', '/v:off', '/e:on', '/e:off'))) { continue }
+            return New-SafeDeletePlan deny 'Unsupported shell startup arguments cannot be checked.'
         }
         if ($flag -ge 0 -and ($flag + 1) -lt $e.Count) {
             try {
                 if ($e.Count -eq ($flag + 2)) { $inner = Get-SafeDeleteLiteral $e[$flag + 1] }
                 else { $inner = $Command.Substring($e[$flag + 1].Extent.StartOffset, $wrapper.Extent.EndOffset - $e[$flag + 1].Extent.StartOffset) }
-                $plan = Get-SafeDeleteCommandPlan -Command $inner -WorkingDirectory $WorkingDirectory -ProjectRoot $ProjectRoot -Depth ($Depth + 1)
+                $plan = Get-SafeDeleteCommandPlan -Command $inner -WorkingDirectory $WorkingDirectory -ProjectRoot $ProjectRoot -Depth ($Depth + 1) -Shell $n
+                if ($plan.action -eq 'delete' -and $n -in @('powershell', 'pwsh') -and -not $noProfile) {
+                    return New-SafeDeletePlan deny 'PowerShell wrapper deletion requires -NoProfile so startup profiles cannot change the deletion directory.'
+                }
                 if ($plan.action -ne 'allow') {
                     if ($commands.Count -ne 1) { return New-SafeDeletePlan deny 'Deletion mixed with other commands is blocked. Split the commands.' }
                     return $plan

@@ -1,5 +1,22 @@
 $ErrorActionPreference = 'Stop'
 
+function Assert-SafeDeleteSupportedInstallRuntime {
+    param(
+        [version]$PowerShellVersion = $PSVersionTable.PSVersion,
+        [PlatformID]$Platform = [Environment]::OSVersion.Platform,
+        [version]$WindowsVersion = [Environment]::OSVersion.Version
+    )
+    if ($Platform -ne [PlatformID]::Win32NT) {
+        throw 'This installer supports Windows only. Linux and macOS installation is not implemented.'
+    }
+    if ($PowerShellVersion -lt [version]'5.1') {
+        throw 'Windows PowerShell 5.1 or PowerShell 7 is required. No configuration was changed.'
+    }
+    if ($WindowsVersion.Build -lt 17763) {
+        throw 'Codex integration requires Windows 10 version 1809 or newer. Windows 7 and 8 are not supported. No configuration was changed.'
+    }
+}
+
 function Get-SafeDeleteFileHash {
     param([string]$Path)
     if (-not (Test-Path -LiteralPath $Path)) { return $null }
@@ -7,6 +24,66 @@ function Get-SafeDeleteFileHash {
     $sha = [Security.Cryptography.SHA256]::Create()
     try { [BitConverter]::ToString($sha.ComputeHash($stream)).Replace('-', '') }
     finally { $sha.Dispose(); $stream.Dispose() }
+}
+
+function Get-SafeDeleteInstallationMutexNames {
+    param([string]$InstallDir, [string]$CodexHome)
+    $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+    try { $sid = $identity.User.Value } finally { $identity.Dispose() }
+    $names = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::Ordinal)
+    foreach ($path in @($InstallDir, $CodexHome)) {
+        Assert-SafeDeleteInstallPath $path
+        $absolute = [IO.Path]::GetFullPath($path)
+        $cursor = $absolute
+        $missing = New-Object 'System.Collections.Generic.Stack[string]'
+        while (-not (Test-Path -LiteralPath $cursor)) {
+            $missing.Push([IO.Path]::GetFileName($cursor))
+            $parent = [IO.Directory]::GetParent($cursor)
+            if ($null -eq $parent) { throw 'Installation lock path cannot be resolved.' }
+            $cursor = $parent.FullName
+        }
+        $absolute = (Get-Item -LiteralPath $cursor -Force -ErrorAction Stop).FullName
+        while ($missing.Count -gt 0) { $absolute = Join-Path $absolute $missing.Pop() }
+        $normalized = $absolute.TrimEnd([char[]]@('\', '/')).ToLowerInvariant()
+        $sha = [Security.Cryptography.SHA256]::Create()
+        try { $hash = [BitConverter]::ToString($sha.ComputeHash((New-Object Text.UTF8Encoding($false)).GetBytes($sid + "`n" + $normalized))).Replace('-', '') }
+        finally { $sha.Dispose() }
+        # Global named mutexes work across sessions. Unlike global file mappings,
+        # creating a mutex does not require SeCreateGlobalPrivilege.
+        $null = $names.Add('Global\CodexSafeDelete-' + $hash)
+    }
+    $ordered = @($names)
+    [Array]::Sort($ordered, [StringComparer]::Ordinal)
+    return $ordered
+}
+
+function Exit-SafeDeleteInstallationLocks {
+    param([object[]]$Locks)
+    for ($i = $Locks.Count - 1; $i -ge 0; $i--) {
+        try { $Locks[$i].ReleaseMutex() } finally { $Locks[$i].Dispose() }
+    }
+}
+
+function Enter-SafeDeleteInstallationLocks {
+    param([string]$InstallDir, [string]$CodexHome)
+    $owned = New-Object 'System.Collections.Generic.List[object]'
+    $pending = $null
+    try {
+        foreach ($name in @(Get-SafeDeleteInstallationMutexNames $InstallDir $CodexHome)) {
+            $pending = [Threading.Mutex]::new($false, $name)
+            $acquired = $false
+            try { $acquired = $pending.WaitOne(0) }
+            catch [Threading.AbandonedMutexException] { $acquired = $true }
+            if (-not $acquired) { throw 'Another SafeDelete installation or uninstall is using this installation or Codex configuration. Wait for it to finish and retry. No changes were made.' }
+            $owned.Add($pending)
+            $pending = $null
+        }
+        return $owned.ToArray()
+    } catch {
+        if ($null -ne $pending) { $pending.Dispose() }
+        Exit-SafeDeleteInstallationLocks $owned.ToArray()
+        throw
+    }
 }
 
 function Write-SafeDeleteBytes {
@@ -88,13 +165,30 @@ function Test-SafeDeleteHookCommand {
         $process.StandardInput.BaseStream.Flush(); $process.StandardInput.Close()
         if (-not $process.WaitForExit(10000)) { $process.Kill(); throw 'Hook runtime verification timed out.' }
         if ($process.ExitCode -ne 0) { throw ('Hook runtime verification failed. Exit code: ' + $process.ExitCode) }
+        if (-not [string]::IsNullOrWhiteSpace($errors.Result)) { throw 'Hook runtime verification returned error output. Protection health was not verified.' }
         if ([string]::IsNullOrWhiteSpace($output.Result)) { throw 'Hook runtime verification returned no output. Check whether security software blocked the Hook.' }
+        if (-not $output.Result.TrimStart().StartsWith('{',[StringComparison]::Ordinal)) { throw 'Hook runtime verification must return a JSON object.' }
         $response = $output.Result | ConvertFrom-Json
+        if ($response -isnot [pscustomobject]) { throw 'Hook runtime verification must return a JSON object.' }
         if ($ExpectedDecision -eq 'bypass') {
             if ($null -eq $response -or @($response.PSObject.Properties).Count -ne 0) { throw 'Hook runtime verification did not confirm paused protection.' }
-        } elseif ($null -eq $response -or -not $response.PSObject.Properties['hookSpecificOutput'] -or
-            -not $response.hookSpecificOutput -or -not $response.hookSpecificOutput.PSObject.Properties['permissionDecision'] -or
-            $response.hookSpecificOutput.permissionDecision -ne 'deny') { throw 'Hook runtime verification did not deny project-root deletion. Check whether security software blocked the Hook.' }
+        } else {
+            $specificProperty = $response.PSObject.Properties['hookSpecificOutput']
+            if ($null -eq $specificProperty -or $specificProperty.Name -cne 'hookSpecificOutput' -or $specificProperty.Value -isnot [pscustomobject]) { throw 'Hook runtime verification did not deny project-root deletion. Protection health was not verified.' }
+            $specific = $specificProperty.Value
+            $eventProperty = $specific.PSObject.Properties['hookEventName']
+            $decisionProperty = $specific.PSObject.Properties['permissionDecision']
+            $reasonProperty = $specific.PSObject.Properties['permissionDecisionReason']
+            if ($null -eq $eventProperty -or $eventProperty.Name -cne 'hookEventName' -or $eventProperty.Value -isnot [string] -or $eventProperty.Value -cne 'PreToolUse' -or
+                $null -eq $decisionProperty -or $decisionProperty.Name -cne 'permissionDecision' -or $decisionProperty.Value -isnot [string] -or $decisionProperty.Value -cne 'deny' -or
+                $null -eq $reasonProperty -or $reasonProperty.Name -cne 'permissionDecisionReason' -or $reasonProperty.Value -isnot [string] -or
+                $null -ne $specific.PSObject.Properties['updatedInput']) { throw 'Hook runtime verification did not deny project-root deletion. Protection health was not verified.' }
+            # A watchdog or worker fault also denies commands. Require the normal
+            # parser's exact root-deletion diagnostic before reporting healthy ON.
+            $reasonLines = @($reasonProperty.Value -split '\r?\n')
+            if ($reasonLines -cnotcontains 'DENY: The project root, its parents, and paths outside the project are blocked.' -or
+                $reasonLines -cnotcontains 'Command: Remove-Item -Recurse -Force .') { throw 'Hook runtime verification did not confirm the project-root deletion policy. Protection health was not verified.' }
+        }
     } finally { $process.Dispose() }
 }
 

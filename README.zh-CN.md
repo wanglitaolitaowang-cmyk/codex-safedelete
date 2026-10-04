@@ -70,7 +70,7 @@ safedelete status
 
 ```text
 Codex 尝试删除：
-rm -rf src/
+Remove-Item -Recurse -Force src/
 
 SafeDelete：
 已拦截 → 移入可恢复的本地保存区
@@ -88,6 +88,15 @@ safedelete undo
 | Codex CLI 0.160.0，本地 `codex.exe` | 真实 Hook → 安全保存 → undo → 卸载通过 |
 | Codex Desktop 26.930.3930.0 | 真实安装、完全重启、删除拦截、undo、默认卸载通过 |
 | PowerShell 5.1 / 7 混用、Windows 936 / 65001 代码页 | 特殊字符路径、二进制内容及空目录已验证 |
+| Windows 7 / 8，或 Windows 10 1809 之前的版本 | 不支持 Codex 集成；安装会在修改配置前退出 |
+| Linux / macOS | 尚未提供安装入口和平台适配；当前版本不支持 |
+
+Desktop 的完整退出与重启来自此前实测；本轮 MVP 修复没有重复完整 GUI 重启流程。
+各轮验证和失败记录见 [TEST-RESULTS.md](TEST-RESULTS.md)。
+
+安装要求 Windows 10 1809（build 17763）或更新版本，以及 PowerShell 5.1 或更新版本。
+系统边界依据 [Codex 官方 Windows 说明](https://developers.openai.com/codex/windows)：
+推荐 Windows 11，Windows 10 属于尽力支持范围。
 
 暂停与恢复、Desktop 完全重启后的状态持久化、旧记录恢复和默认卸载也已验证。
 本机 Desktop 测试需要用户手动允许 360 对 Hook 和控制台宿主的提示。
@@ -102,6 +111,17 @@ safedelete undo
 若本地 Codex 初始化超时且回滚已完成，先双击 `Uninstall SafeDelete.cmd` 清理残留安装，
 再双击 `Install SafeDelete.cmd` 重试。清理会保留回滚后对配置和 PATH 的修改。
 若回滚未完成，先检查错误及保留的配置备份，再处理重试。
+
+重复安装只验证已有程序，不会升级文件。若新旧程序文件不同，安装会退出，
+并保留现有安装。请先使用原版本的 `Uninstall SafeDelete.cmd` 卸载，
+再安装新版本；项目中的回收站和历史记录会保留。
+
+同一 Windows 用户不能同时对相同安装目录或 Codex 配置执行安装、卸载。
+若另一个操作正在占用，本次操作会退出且不做修改；等它完成后再重试。
+
+若已有 SafeDelete 注册但缺少对应安装状态，安装会在修改文件前退出，避免再添加一份 Hook。
+验证会合并同一 key 的完全相同报告；不同注册或相互冲突的记录会报错，并显示来源和 key。
+已有安装请使用原卸载程序处理；状态缺失或不完整时，请保留错误和配置备份再检查。
 
 高级用户可在解压后的项目目录用 PowerShell 安装：
 
@@ -141,16 +161,24 @@ Hook 每次调用都会读取状态。OFF 时 `list`、`undo`、`restore` 和主
 只有在确实想停止保护时才暂停；代理不得用暂停绕过被拒绝的删除。
 暂停功能出现前安装的旧版，需要先用原卸载程序卸载；安装程序不会静默覆盖。
 
-识别 `rm`、`del`、`erase`、`rmdir`、`rd`、`Remove-Item` 及其字面量 shell 包装命令。
+自动恢复支持 PowerShell 的字面量删除命令。默认 Windows Shell 下请使用 `Remove-Item`。
+`rm`、`del`、`erase`、`rmdir`、`rd` 等歧义别名需要明确的 PowerShell Shell 信息，
+或 `powershell -NoProfile -Command` / `pwsh -NoProfile -Command` 包装；缺少这些信息时会拒绝。
+PowerShell 包装命令必须带 `-NoProfile` 才能自动恢复。启动时指定目录
+（`-WorkingDirectory` / `-wd`）、动态或未知启动参数、不支持的删除选项均拒绝。
+请用工具的 `workdir` 指定工作目录。
 原删除命令被本地 SafeDelete CLI 替代，将实际工作目录内的明确目标移入恢复区。
+Bash、sh、CMD、WSL 的删除命令会拒绝；请在 Windows PowerShell 终端使用 `safedelete delete`。
 `git clean` 和 `git reset --hard` 始终拒绝。
 项目根目录、项目外路径、`.git`、`.env`、`.ssh`、恢复区、`.codex`、链接/联接点，以及一次超过
-**1000 个文件或目录**的删除均拒绝。包含受保护路径的目录也拒绝。
+**1000 个文件或目录**的删除均拒绝。包含受保护路径的目录、Windows 大小写敏感目录也拒绝。
+无法可靠确认目录语义时会拒绝，包括部分网络共享。
 通配符、动态删除路径、混合删除与其他操作的命令会被拒绝；请拆开命令，或向 `safedelete delete`
 传入明确路径。
 
 普通 `git status`、`npm test` 和源码编辑不受影响。
 不透明 shell 脚本、编码命令和交互式 shell 会被拒绝。
+Hook 检查失败或超过 20 秒预算时会明确拒绝原命令，避免慢盘或检查进程故障后继续删除。
 明确的 `apply_patch` Delete File 指令也拒绝，请先使用 `safedelete delete`；普通补丁继续运行。
 项目通过 `.git` 或最近的恢复区识别；没有这些标记时，当前目录就是项目根目录。
 

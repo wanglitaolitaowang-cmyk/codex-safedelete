@@ -15,6 +15,12 @@ function Assert-True {
     param([bool]$Condition, [string]$Message)
     if (-not $Condition) { throw $Message }
 }
+function Get-NativeFileHash([string]$Path) {
+    $stream = [IO.File]::OpenRead($Path)
+    $sha = [Security.Cryptography.SHA256]::Create()
+    try { return [BitConverter]::ToString($sha.ComputeHash($stream)).Replace('-', '') }
+    finally { $sha.Dispose(); $stream.Dispose() }
+}
 function New-Fixture {
     param([string]$Name)
     $path = Join-Path $evidence $Name
@@ -369,7 +375,7 @@ $report = [pscustomobject]@{
     result = $(if ($failed -eq 0) { 'PASS' } else { 'FAIL' })
     runtime = $PSVersionTable.PSVersion.ToString(); tested_at = [DateTime]::UtcNow.ToString('o')
     total = $results.Count; passed = $passed; failed = $failed
-    storage_sha256 = (Get-FileHash -LiteralPath (Join-Path $project 'src\Storage.ps1') -Algorithm SHA256).Hash
+    storage_sha256 = Get-NativeFileHash (Join-Path $project 'src\Storage.ps1')
     tests = @($results.ToArray()); fixtures = $evidence
 }
 [IO.File]::WriteAllText($reportPath, (ConvertTo-Json -InputObject $report -Depth 5), (New-Object Text.UTF8Encoding($false)))

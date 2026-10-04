@@ -153,6 +153,14 @@ function Invoke-Cli {
     return Invoke-Process -Program $ShellPath -Arguments $arguments -WorkingDirectory $Root
 }
 
+function Get-PlainProcessError([string]$Message) {
+    # Keep the original stderr in process evidence. Remove only display markup
+    # from this derived text so PowerShell 7 wrapping does not break assertions.
+    $plain = $Message -replace '\x1B\[[0-?]*[ -/]*[@-~]', ''
+    $lines = @($plain -split '\r?\n' | ForEach-Object { $_ -replace '^\s*(?:\d+\s*)?\|\s*', '' })
+    return (($lines -join ' ') -replace '\s+', ' ').Trim()
+}
+
 # Keep the hook protocol in one helper so tests follow the installed Codex protocol.
 function Complete-ToolHook($Result, [string]$WorkingDirectory) {
     $execution = $null
@@ -353,7 +361,7 @@ Invoke-Case 'quoted Unicode path and exec_command compatibility' {
     $name = "space $([char]0x6D4B)$([char]0x8BD5)'s file.txt"
     $file = Join-Path $root $name
     [IO.File]::WriteAllText($file, 'unicode path content')
-    $command = "rm '" + $name.Replace("'", "''") + "'"
+    $command = "Remove-Item -LiteralPath '" + $name.Replace("'", "''") + "'"
     $payload = @{
         hook_event_name = 'PreToolUse'; cwd = $root; tool_name = 'exec_command'
         tool_input = @{ cmd = $command; workdir = $root }
@@ -421,15 +429,20 @@ Invoke-Case 'missing Storage module returns a blocking hook decision' {
     if ($result.exitCode -ne 2) { Assert-DeleteRefused (Complete-ToolHook $result $root) }
 }
 
-Invoke-Case 'missing CLI entry makes hook exit 2' {
+Invoke-Case 'missing CLI entry returns an explicit blocking hook decision' {
     $root = New-Fixture 'missing-cli'
     [void][IO.Directory]::CreateDirectory((Join-Path $root 'hooks'))
     [IO.File]::Copy((Join-Path $SourceRoot 'hooks\pre-tool-use.ps1'), (Join-Path $root 'hooks\pre-tool-use.ps1'))
     [void][IO.Directory]::CreateDirectory((Join-Path $root 'src'))
     foreach ($name in @('Protection.ps1','InstallState.ps1')) { [IO.File]::Copy((Join-Path $SourceRoot ('src\'+$name)), (Join-Path $root ('src\'+$name))) }
     $payload = @{ hook_event_name='PreToolUse'; cwd=$root; tool_name='Bash'; tool_input=@{command='Remove-Item test.txt'} } | ConvertTo-Json -Depth 6 -Compress
+    $file = Join-Path $root 'test.txt'
+    [IO.File]::WriteAllText($file, 'preserve me')
     $result = Invoke-Process -Program $ShellPath -Arguments @('-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', (Join-Path $root 'hooks\pre-tool-use.ps1')) -InputText $payload -WorkingDirectory $root
-    Assert-True ($result.exitCode -eq 2) "Missing CLI hook failed open (exit $($result.exitCode))"
+    Assert-True ($result.exitCode -eq 0) 'Explicit failure denial did not use a successful JSON transport exit'
+    Assert-DeleteRefused (Complete-ToolHook $result $root)
+    Assert-True ([IO.File]::ReadAllText($file) -ceq 'preserve me') 'Missing CLI changed the original contents'
+    Assert-True (-not (Test-Path -LiteralPath (Join-Path $root '.codex-safedelete\history.json'))) 'Missing CLI created deletion history'
 }
 
 foreach ($sample in @(
@@ -440,10 +453,10 @@ foreach ($sample in @(
     @{ name = 'rmdir'; command = 'rmdir /s /q test-folder'; directory = $true },
     @{ name = 'rd'; command = 'rd /s /q test-folder'; directory = $true },
     @{ name = 'Remove-Item'; command = 'Remove-Item -LiteralPath test.txt'; directory = $false },
-    @{ name = 'PowerShell wrapper'; command = 'powershell -Command "Remove-Item test.txt"'; directory = $false }
+    @{ name = 'PowerShell wrapper'; command = 'powershell -NoProfile -Command "Remove-Item test.txt"'; directory = $false }
 )) {
     $case = $sample
-    Invoke-Case ('actual hook safe delete: ' + $case.name) {
+    Invoke-Case ('actual hook deletion handling: ' + $case.name) {
         $root = New-Fixture ('command-' + ($case.name -replace ' ', '-'))
         if ($case.directory) {
             $target = Join-Path $root 'test-folder'
@@ -453,6 +466,15 @@ foreach ($sample in @(
         else {
             $target = Join-Path $root 'test.txt'
             [IO.File]::WriteAllText($target, 'preserve me')
+        }
+        if ($case.name -notin @('Remove-Item','PowerShell wrapper')) {
+            [void](Assert-Plan $root $case.command 'deny')
+            Assert-DeleteRefused (Invoke-ToolHook $root $case.command)
+            Assert-True (Test-Path -LiteralPath $target) 'Ambiguous alias changed the original target'
+            $payloadFile = if ($case.directory) { Join-Path $target 'payload.txt' } else { $target }
+            Assert-True ([IO.File]::ReadAllText($payloadFile) -ceq 'preserve me') 'Ambiguous alias changed the original contents'
+            Assert-True (-not (Test-Path -LiteralPath (Join-Path $root '.codex-safedelete\history.json'))) 'Ambiguous alias created deletion history'
+            return
         }
         [void](Assert-Plan $root $case.command 'delete')
         $hook = Invoke-ToolHook $root $case.command
@@ -642,6 +664,136 @@ Invoke-Case 'Desktop pipe rotation guard refuses unrelated edits and ambiguous c
 }
 
 if (-not $SkipInstall) {
+    Invoke-Case 'installation locks serialize shared directories before writes and release for retry' {
+        $root = New-Fixture 'installation-mutex'
+        $codexHome = Join-Path $root 'codex-home'; $otherHome = Join-Path $root 'other-home'
+        $installDir = Join-Path $root 'installed'; $otherInstall = Join-Path $root 'other-installed'
+        $preserved = @()
+        foreach ($homePath in @($codexHome, $otherHome)) {
+            [void][IO.Directory]::CreateDirectory($homePath)
+            foreach ($name in @('config.toml', 'hooks.json')) {
+                $path = Join-Path $homePath $name
+                $content = if ($name -eq 'config.toml') { "# original mutex fixture`r`n" } else { '{"hooks":{}}' }
+                [IO.File]::WriteAllText($path, $content)
+                $preserved += [pscustomobject]@{ path=$path; hash=(Get-SafeDeleteFileHash $path) }
+            }
+        }
+        $userPathBefore = [Environment]::GetEnvironmentVariable('Path','User'); $processPathBefore = $env:Path
+        $readyPath = Join-Path $root 'mutex-ready.txt'
+        $mutexQuote = { param([string]$value) "'" + $value.Replace("'", "''") + "'" }
+        $holdScript = '. ' + (& $mutexQuote (Join-Path $SourceRoot 'src\InstallState.ps1')) + "`r`n" +
+            '$held = @(Enter-SafeDeleteInstallationLocks -InstallDir ' + (& $mutexQuote $installDir) + ' -CodexHome ' + (& $mutexQuote $codexHome) + ')' + "`r`n" +
+            'try { [IO.File]::WriteAllText(' + (& $mutexQuote $readyPath) + ', ''ready''); [Console]::In.ReadLine() | Out-Null } finally { Exit-SafeDeleteInstallationLocks $held }'
+        $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($holdScript))
+        $start = New-Object Diagnostics.ProcessStartInfo
+        $start.FileName = $ShellPath
+        $start.Arguments = '-NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand ' + $encoded
+        $start.WorkingDirectory = $root
+        $start.UseShellExecute = $false; $start.CreateNoWindow = $true
+        $start.RedirectStandardInput = $true; $start.RedirectStandardOutput = $true; $start.RedirectStandardError = $true
+        $start.StandardOutputEncoding = New-Object Text.UTF8Encoding($false); $start.StandardErrorEncoding = New-Object Text.UTF8Encoding($false)
+        $holder = New-Object Diagnostics.Process
+        $holder.StartInfo = $start
+        $started = $false; $stdoutTask = $null; $stderrTask = $null
+        try {
+            $started = $holder.Start()
+            $stdoutTask = $holder.StandardOutput.ReadToEndAsync(); $stderrTask = $holder.StandardError.ReadToEndAsync()
+            $deadline = [DateTime]::UtcNow.AddSeconds(15)
+            while (-not (Test-Path -LiteralPath $readyPath) -and -not $holder.HasExited -and [DateTime]::UtcNow -lt $deadline) { Start-Sleep -Milliseconds 50 }
+            Assert-True ((Test-Path -LiteralPath $readyPath) -and -not $holder.HasExited) 'Isolated process did not acquire the installation mutexes; see holder evidence'
+            foreach ($pair in @(
+                [pscustomobject]@{ install=$installDir; home=$otherHome },
+                [pscustomobject]@{ install=$otherInstall; home=$codexHome })) {
+                $blocked = Invoke-Process -Program $ShellPath -Arguments @('-NoLogo','-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',(Join-Path $SourceRoot 'install.ps1'),'-CodexHome',$pair.home,'-InstallDir',$pair.install,'-NoPathUpdate') -WorkingDirectory $root
+                Assert-True ($blocked.exitCode -ne 0 -and (Get-PlainProcessError $blocked.stderr) -match 'Another SafeDelete installation or uninstall' -and (Get-PlainProcessError $blocked.stderr) -match 'No changes were made') 'Concurrent installation did not clearly refuse the shared resource'
+                Assert-True (-not (Test-Path -LiteralPath $installDir) -and -not (Test-Path -LiteralPath $otherInstall)) 'Busy mutex refusal wrote installation files'
+                foreach ($entry in $preserved) { Assert-True ((Get-SafeDeleteFileHash $entry.path) -ceq $entry.hash) 'Busy mutex refusal modified original configuration' }
+                Assert-True (-not (Test-Path -LiteralPath (Join-Path $root '.codex-safedelete\history.json'))) 'Busy mutex refusal changed project history'
+                Assert-True ([string]::Equals([Environment]::GetEnvironmentVariable('Path','User'),$userPathBefore,[StringComparison]::Ordinal) -and [string]::Equals($env:Path,$processPathBefore,[StringComparison]::Ordinal)) 'Busy mutex refusal changed PATH'
+            }
+            $holder.StandardInput.WriteLine('release'); $holder.StandardInput.Flush(); $holder.StandardInput.Close()
+            Assert-True ($holder.WaitForExit(15000) -and $holder.ExitCode -eq 0) 'Lock-holder did not release its mutexes cleanly'
+            $installed = Invoke-Process -Program $ShellPath -Arguments @('-NoLogo','-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',(Join-Path $SourceRoot 'install.ps1'),'-CodexHome',$codexHome,'-InstallDir',$installDir,'-NoPathUpdate') -WorkingDirectory $root
+            Assert-True ($installed.exitCode -eq 0) 'Installation could not retry after mutex release'
+            $uninstalled = Invoke-Process -Program $ShellPath -Arguments @('-NoLogo','-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',(Join-Path $SourceRoot 'uninstall.ps1'),'-CodexHome',$codexHome,'-InstallDir',$installDir,'-NoPathUpdate') -WorkingDirectory $root
+            Assert-True ($uninstalled.exitCode -eq 0 -and -not (Test-Path -LiteralPath $installDir)) 'Mutex-protected installation could not uninstall'
+            foreach ($entry in $preserved) { Assert-True ((Get-SafeDeleteFileHash $entry.path) -ceq $entry.hash) 'Install/uninstall after release changed the original configuration' }
+            Assert-True ([string]::Equals([Environment]::GetEnvironmentVariable('Path','User'),$userPathBefore,[StringComparison]::Ordinal) -and [string]::Equals($env:Path,$processPathBefore,[StringComparison]::Ordinal)) 'Mutex retry test changed PATH'
+            $script:evidence.Add([pscustomobject]@{ sharedInstallDirRefused=$true; sharedCodexHomeRefused=$true; busyRefusalBeforeWrites=$true; releaseThenInstallAndUninstallSucceeded=$true; originalConfigurationsAndPathPreserved=$true })
+        } finally {
+            if ($started -and -not $holder.HasExited) {
+                $holder.StandardInput.Close()
+                if (-not $holder.WaitForExit(5000)) { $holder.Kill(); $holder.WaitForExit() }
+            }
+            if ($null -ne $stdoutTask) { [IO.File]::WriteAllText((Join-Path $root 'mutex-holder-stdout.txt'), $stdoutTask.Result, (New-Object Text.UTF8Encoding($false))) }
+            if ($null -ne $stderrTask) { [IO.File]::WriteAllText((Join-Path $root 'mutex-holder-stderr.txt'), $stderrTask.Result, (New-Object Text.UTF8Encoding($false))) }
+            $holder.Dispose()
+        }
+    }
+
+    Invoke-Case 'config directory refuses installation before any changes' {
+        $root = New-Fixture 'install-config-directory'
+        $codexHome = Join-Path $root 'codex-home'; $installDir = Join-Path $root 'installed'
+        $configPath = Join-Path $codexHome 'config.toml'; $hooksPath = Join-Path $codexHome 'hooks.json'
+        [void][IO.Directory]::CreateDirectory($configPath)
+        $sentinel = Join-Path $configPath 'keep.txt'
+        [IO.File]::WriteAllText($sentinel, 'existing configuration directory content')
+        [IO.File]::WriteAllText($hooksPath, '{"hooks":{}}')
+        $sentinelHash = Get-SafeDeleteFileHash $sentinel; $hooksHash = Get-SafeDeleteFileHash $hooksPath
+        $userPathBefore = [Environment]::GetEnvironmentVariable('Path','User'); $processPathBefore = $env:Path
+        $blocked = Invoke-Process -Program $ShellPath -Arguments @('-NoLogo','-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',(Join-Path $SourceRoot 'install.ps1'),'-CodexHome',$codexHome,'-InstallDir',$installDir,'-NoPathUpdate') -WorkingDirectory $root
+        Assert-True ($blocked.exitCode -ne 0 -and (Get-PlainProcessError $blocked.stderr) -match 'config.toml must be a regular file') 'Installer did not clearly reject a config directory'
+        Assert-True (-not (Test-Path -LiteralPath $installDir)) 'Config directory refusal left installation or backup artifacts'
+        Assert-True ((Get-SafeDeleteFileHash $sentinel) -ceq $sentinelHash -and (Get-SafeDeleteFileHash $hooksPath) -ceq $hooksHash) 'Config directory refusal changed existing configuration contents'
+        Assert-True (-not (Test-Path -LiteralPath (Join-Path $root '.codex-safedelete\history.json'))) 'Config directory refusal created recovery history'
+        Assert-True ([string]::Equals([Environment]::GetEnvironmentVariable('Path','User'),$userPathBefore,[StringComparison]::Ordinal) -and [string]::Equals($env:Path,$processPathBefore,[StringComparison]::Ordinal)) 'Config directory refusal changed PATH'
+        $script:evidence.Add([pscustomobject]@{ configDirectoryRefused=$true; installDirNotCreated=$true; existingContentsUnchanged=$true; historyAndPathUnchanged=$true })
+    }
+
+    Invoke-Case 'unreadable config refuses installation before backup creation' {
+        $root = New-Fixture 'install-unreadable-config'
+        $codexHome = Join-Path $root 'codex-home'; $installDir = Join-Path $root 'installed'
+        [void][IO.Directory]::CreateDirectory($codexHome)
+        $configPath = Join-Path $codexHome 'config.toml'; $hooksPath = Join-Path $codexHome 'hooks.json'
+        [IO.File]::WriteAllText($configPath, "# preserved config`r`n"); [IO.File]::WriteAllText($hooksPath, '{"hooks":{}}')
+        $configHash = Get-SafeDeleteFileHash $configPath; $hooksHash = Get-SafeDeleteFileHash $hooksPath
+        $userPathBefore = [Environment]::GetEnvironmentVariable('Path','User'); $processPathBefore = $env:Path
+        $handle = [IO.File]::Open($configPath, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::None)
+        try {
+            $blocked = Invoke-Process -Program $ShellPath -Arguments @('-NoLogo','-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',(Join-Path $SourceRoot 'install.ps1'),'-CodexHome',$codexHome,'-InstallDir',$installDir,'-NoPathUpdate') -WorkingDirectory $root
+            Assert-True ($blocked.exitCode -ne 0) 'Installer accepted unreadable original configuration'
+            Assert-True (-not (Test-Path -LiteralPath $installDir)) 'Unreadable config left installation or backup artifacts'
+        } finally { $handle.Dispose() }
+        Assert-True ((Get-SafeDeleteFileHash $configPath) -ceq $configHash -and (Get-SafeDeleteFileHash $hooksPath) -ceq $hooksHash) 'Unreadable config refusal changed original bytes'
+        Assert-True (-not (Test-Path -LiteralPath (Join-Path $root '.codex-safedelete\history.json'))) 'Unreadable config refusal created recovery history'
+        Assert-True ([string]::Equals([Environment]::GetEnvironmentVariable('Path','User'),$userPathBefore,[StringComparison]::Ordinal) -and [string]::Equals($env:Path,$processPathBefore,[StringComparison]::Ordinal)) 'Unreadable config refusal changed PATH'
+        $script:evidence.Add([pscustomobject]@{ unreadableConfigRefused=$true; installDirNotCreated=$true; configurationHooksHistoryAndPathUnchanged=$true })
+    }
+
+    Invoke-Case 'backup copy failure cleans only preparation artifacts and permits retry' {
+        $root = New-Fixture 'install-backup-copy-failure'
+        $sourceCopy = New-InstallSourceFixture $root
+        $installScript = Join-Path $sourceCopy 'install.ps1'
+        $sourceText = [IO.File]::ReadAllText($installScript)
+        $marker = '$ErrorActionPreference = ''Stop'''
+        Assert-True ($sourceText.Contains($marker)) 'Copy fault fixture could not locate script-scope injection point'
+        $mock = @('function Copy-Item {', '    param([string]$LiteralPath, [string]$Destination)', '    [IO.File]::WriteAllText($Destination, ''partial backup fixture'')', '    throw ''Injected backup copy failure.''', '}') -join "`r`n"
+        [IO.File]::WriteAllText($installScript, $sourceText.Replace($marker, $marker + "`r`n" + $mock), (New-Object Text.UTF8Encoding($false)))
+        $codexHome = Join-Path $root 'codex-home'; $installDir = Join-Path $root 'installed'
+        [void][IO.Directory]::CreateDirectory($codexHome)
+        $configPath = Join-Path $codexHome 'config.toml'; $hooksPath = Join-Path $codexHome 'hooks.json'
+        [IO.File]::WriteAllText($configPath, "# preserved config`r`n"); [IO.File]::WriteAllText($hooksPath, '{"hooks":{}}')
+        $configHash = Get-SafeDeleteFileHash $configPath; $hooksHash = Get-SafeDeleteFileHash $hooksPath
+        $userPathBefore = [Environment]::GetEnvironmentVariable('Path','User'); $processPathBefore = $env:Path
+        $blocked = Invoke-Process -Program $ShellPath -Arguments @('-NoLogo','-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',$installScript,'-CodexHome',$codexHome,'-InstallDir',$installDir,'-NoPathUpdate') -WorkingDirectory $root
+        Assert-True ($blocked.exitCode -ne 0 -and (Get-PlainProcessError $blocked.stderr) -match 'Injected backup copy failure') 'The scoped copy fault did not fail backup preparation'
+        Assert-True (-not (Test-Path -LiteralPath $installDir)) 'Failed backup preparation left a dirty installation that blocks retry'
+        Assert-True ((Get-SafeDeleteFileHash $configPath) -ceq $configHash -and (Get-SafeDeleteFileHash $hooksPath) -ceq $hooksHash) 'Backup preparation failure restored or changed original configuration'
+        Assert-True (-not (Test-Path -LiteralPath (Join-Path $root '.codex-safedelete\history.json'))) 'Backup preparation failure created recovery history'
+        Assert-True ([string]::Equals([Environment]::GetEnvironmentVariable('Path','User'),$userPathBefore,[StringComparison]::Ordinal) -and [string]::Equals($env:Path,$processPathBefore,[StringComparison]::Ordinal)) 'Backup preparation failure changed PATH'
+        $script:evidence.Add([pscustomobject]@{ backupCopyFault=$true; partialBackupRemoved=$true; installDirRemoved=$true; retryNotBlockedByArtifacts=$true; configurationHooksHistoryAndPathUnchanged=$true })
+    }
+
     foreach ($existingConfiguration in @($true,$false)) {
         $label = if ($existingConfiguration) { 'edited' } else { 'new' }
         Invoke-Case ("rolled-back cleanup preserves $label configuration hooks and current PATH") {
@@ -716,7 +868,10 @@ function Write-SafeDeleteJson {
         $root = New-Fixture 'installation-timeout-retry'
         $sourceCopy = New-InstallSourceFixture $root
         $hookPath = Join-Path $sourceCopy 'hooks\pre-tool-use.ps1'
-        [IO.File]::WriteAllText($hookPath, "Start-Sleep -Seconds 11`r`n" + [IO.File]::ReadAllText($hookPath), (New-Object Text.UTF8Encoding($false)))
+        $hookSource = [IO.File]::ReadAllText($hookPath)
+        $marker = 'param([switch]$Worker)'
+        Assert-True ($hookSource.Contains($marker)) 'Hook parameter marker changed; update the timeout fixture deliberately'
+        [IO.File]::WriteAllText($hookPath, $hookSource.Replace($marker, $marker + "`r`nStart-Sleep -Seconds 11"), (New-Object Text.UTF8Encoding($false)))
         $codexHome = Join-Path $root 'codex-home'
         $installDir = Join-Path $root 'installed'
         [void][IO.Directory]::CreateDirectory($codexHome)
@@ -791,12 +946,92 @@ function Write-SafeDeleteJson {
         Assert-True ([IO.File]::ReadAllText($file) -eq 'installed command content') 'Installed safedelete undo did not restore content'
         $repeat = Invoke-Process -Program $ShellPath -Arguments $installArgs -WorkingDirectory $root
         Assert-True ($repeat.exitCode -eq 0) "Repeated installation failed (exit $($repeat.exitCode)); see process evidence"
+        Assert-True ($repeat.stdout -match 'existing files were not updated') 'Repeated installation did not explain that existing files were not updated'
         $uninstalled = Invoke-Process -Program $ShellPath -Arguments @('-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', (Join-Path $SourceRoot 'uninstall.ps1'), '-CodexHome', $codexHome, '-InstallDir', $installDir, '-NoPathUpdate') -WorkingDirectory $root
         Assert-True ($uninstalled.exitCode -eq 0) "Uninstall failed (exit $($uninstalled.exitCode)); see process evidence"
         Assert-True (Test-Path -LiteralPath $configPath -PathType Leaf) 'Uninstall removed existing config'
         Assert-True ([Convert]::ToBase64String([IO.File]::ReadAllBytes($configPath)) -eq [Convert]::ToBase64String($originalBytes)) 'Uninstall did not restore config byte for byte'
         Assert-True ([Convert]::ToBase64String([IO.File]::ReadAllBytes($hooksPath)) -eq [Convert]::ToBase64String($originalHookBytes)) 'Uninstall did not restore hooks byte for byte'
         Assert-True (-not (Test-Path -LiteralPath $installDir)) 'Uninstall left installed program files behind'
+    }
+
+    Invoke-Case 'repeat installation refuses an older runtime without changing the installation' {
+        $root = New-Fixture 'repeat-install-version-mismatch'
+        $sourceCopy = New-InstallSourceFixture $root
+        $codexHome = Join-Path $root 'codex-home'
+        $installDir = Join-Path $root 'installed'
+        [void][IO.Directory]::CreateDirectory($codexHome)
+        $configPath = Join-Path $codexHome 'config.toml'
+        $hooksPath = Join-Path $codexHome 'hooks.json'
+        [IO.File]::WriteAllText($configPath, "# pre-existing user config`r`n", (New-Object Text.UTF8Encoding($false)))
+        [IO.File]::WriteAllText($hooksPath, '{"hooks":{"PreToolUse":[]}}', (New-Object Text.UTF8Encoding($false)))
+        $originalConfigHash = Get-SafeDeleteFileHash $configPath
+        $originalHooksHash = Get-SafeDeleteFileHash $hooksPath
+        $userPathBefore = [Environment]::GetEnvironmentVariable('Path','User')
+        $processPathBefore = $env:Path
+        # A harmless comment represents an older runtime while keeping the real
+        # installation and its original uninstaller fully operational.
+        [IO.File]::AppendAllText((Join-Path $sourceCopy 'src\Storage.ps1'), "`r`n# Older runtime fixture.`r`n", (New-Object Text.UTF8Encoding($false)))
+        $installed = Invoke-Process -Program $ShellPath -Arguments @('-NoLogo','-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',(Join-Path $sourceCopy 'install.ps1'),'-CodexHome',$codexHome,'-InstallDir',$installDir,'-NoPathUpdate') -WorkingDirectory $root
+        Assert-True ($installed.exitCode -eq 0) 'Older runtime fixture installation failed; see process evidence'
+        Assert-True ((Get-SafeDeleteFileHash (Join-Path $SourceRoot 'src\Storage.ps1')) -cne (Get-SafeDeleteFileHash (Join-Path $installDir 'src\Storage.ps1'))) 'Fixture did not create a source/runtime mismatch'
+        $preservedPaths = @($configPath,$hooksPath,(Join-Path $installDir 'install-state.json'),(Join-Path $installDir 'protection-state.json'))
+        foreach ($relative in @(Get-SafeDeleteInstallManifest)) { $preservedPaths += (Join-Path $installDir $relative) }
+        foreach ($name in @('config.toml','hooks.json')) { $preservedPaths += (Join-Path $installDir ('backup\' + $name)) }
+        $before = @($preservedPaths | ForEach-Object { [pscustomobject]@{ path=$_; hash=(Get-SafeDeleteFileHash $_) } })
+        $repeat = Invoke-Process -Program $ShellPath -Arguments @('-NoLogo','-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',(Join-Path $SourceRoot 'install.ps1'),'-CodexHome',$codexHome,'-InstallDir',$installDir,'-NoPathUpdate') -WorkingDirectory $root
+        Assert-True ($repeat.exitCode -ne 0) 'Repeated installation reported success while keeping an older runtime'
+        $repeatMessage = Get-PlainProcessError $repeat.stderr
+        Assert-True ($repeatMessage -match 'Installed files differ' -and $repeatMessage -match 'does not upgrade' -and $repeatMessage -match 'Uninstall SafeDelete.cmd') 'Version mismatch did not explain the safe uninstall and reinstall procedure'
+        Assert-True ($repeat.stdout -notmatch 'Already installed and verified') 'Blocked repeated installation reported verified success'
+        foreach ($entry in $before) { Assert-True ((Get-SafeDeleteFileHash $entry.path) -ceq $entry.hash) ('Blocked repeated installation modified ' + $entry.path) }
+        Assert-True ([string]::Equals([Environment]::GetEnvironmentVariable('Path','User'),$userPathBefore,[StringComparison]::Ordinal)) 'Blocked repeated installation changed User PATH'
+        Assert-True ([string]::Equals($env:Path,$processPathBefore,[StringComparison]::Ordinal)) 'Blocked repeated installation changed process PATH'
+        $uninstalled = Invoke-Process -Program $ShellPath -Arguments @('-NoLogo','-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',(Join-Path $installDir 'uninstall.ps1'),'-CodexHome',$codexHome,'-InstallDir',$installDir,'-NoPathUpdate') -WorkingDirectory $root
+        Assert-True ($uninstalled.exitCode -eq 0 -and -not (Test-Path -LiteralPath $installDir)) 'Blocked repeated installation could not be cleaned up by its original uninstaller'
+        Assert-True ((Get-SafeDeleteFileHash $configPath) -ceq $originalConfigHash -and (Get-SafeDeleteFileHash $hooksPath) -ceq $originalHooksHash) 'Original uninstaller did not restore the fixture configuration and hooks'
+        Assert-True ([string]::Equals([Environment]::GetEnvironmentVariable('Path','User'),$userPathBefore,[StringComparison]::Ordinal)) 'Mismatch fixture changed the real User PATH'
+        $script:evidence.Add([pscustomobject]@{ runtimeMismatchRefused=$true; preservedFileCount=$before.Count; configurationHooksStateProgramsAndBackupsUnchanged=$true; userPathUnchanged=$true; processPathUnchanged=$true; originalUninstallSucceeded=$true })
+    }
+
+    Invoke-Case 'orphan SafeDelete registrations refuse fresh installation before any changes' {
+        foreach ($count in @(1,2)) {
+            $root = New-Fixture ('orphan-install-' + $count)
+            $codexHome = Join-Path $root 'codex-home'
+            $installDir = Join-Path $root 'installed'
+            [void][IO.Directory]::CreateDirectory($codexHome)
+            $configPath = Join-Path $codexHome 'config.toml'
+            $hooksPath = Join-Path $codexHome 'hooks.json'
+            [IO.File]::WriteAllText($configPath, "# existing user config`r`n", (New-Object Text.UTF8Encoding($false)))
+            $shell = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+            $hookScript = Join-Path $installDir 'hooks\pre-tool-use.ps1'
+            $expectedCommand = "& '" + $shell.Replace("'", "''") + "' -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File '" + $hookScript.Replace("'", "''") + "'"
+            $entries = @([pscustomobject]@{ matcher='^Read$'; hooks=@([pscustomobject]@{ type='command'; command='Write-Output pre-existing' }) })
+            for ($i=0; $i -lt $count; $i++) {
+                $entries += [pscustomobject]@{ matcher='^(Bash|apply_patch)$'; hooks=@([pscustomobject]@{ type='command'; command=$expectedCommand; timeout=30; statusMessage='Codex SafeDelete' }) }
+            }
+            Write-SafeDeleteJson $hooksPath ([pscustomobject]@{ hooks=[pscustomobject]@{ PreToolUse=$entries } })
+            [IO.File]::WriteAllText((Join-Path $root 'history-fixture.txt'), 'existing recoverable deletion')
+            $saved = Invoke-Cli -Action 'delete' -Root $root -Paths @('history-fixture.txt')
+            Assert-True ($saved.exitCode -eq 0) 'Orphan fixture could not create existing recoverable history'
+            $storePath = Join-Path $root '.codex-safedelete'
+            $storeFiles = @(Get-ChildItem -LiteralPath $storePath -Recurse -Force | Where-Object { -not $_.PSIsContainer })
+            Assert-True ($storeFiles.Count -gt 0) 'Orphan fixture has no existing store history'
+            $preservedPaths = @($configPath,$hooksPath) + @($storeFiles | ForEach-Object { $_.FullName })
+            $before = @($preservedPaths | ForEach-Object { [pscustomobject]@{ path=$_; hash=(Get-SafeDeleteFileHash $_) } })
+            $userPathBefore = [Environment]::GetEnvironmentVariable('Path','User')
+            $processPathBefore = $env:Path
+            $blocked = Invoke-Process -Program $ShellPath -Arguments @('-NoLogo','-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',(Join-Path $SourceRoot 'install.ps1'),'-CodexHome',$codexHome,'-InstallDir',$installDir,'-NoPathUpdate') -WorkingDirectory $root
+            Assert-True ($blocked.exitCode -ne 0) ('Installation accepted ' + $count + ' orphan SafeDelete hooks')
+            $message = Get-PlainProcessError $blocked.stderr
+            Assert-True ($message -match 'already registered without matching installation state' -and $message -match 'No changes were made' -and $message -match 'resolve the orphan registration') 'Orphan registration refusal did not explain the safe recovery procedure'
+            Assert-True (-not (Test-Path -LiteralPath $installDir)) 'Orphan registration refusal created an installation or backup directory'
+            foreach ($entry in $before) { Assert-True ((Get-SafeDeleteFileHash $entry.path) -ceq $entry.hash) ('Orphan registration refusal changed ' + $entry.path) }
+            Assert-True (@(Get-ChildItem -LiteralPath $storePath -Recurse -Force | Where-Object { -not $_.PSIsContainer }).Count -eq $storeFiles.Count) 'Orphan registration refusal added store files or history'
+            Assert-True ([string]::Equals([Environment]::GetEnvironmentVariable('Path','User'),$userPathBefore,[StringComparison]::Ordinal)) 'Orphan registration refusal changed User PATH'
+            Assert-True ([string]::Equals($env:Path,$processPathBefore,[StringComparison]::Ordinal)) 'Orphan registration refusal changed process PATH'
+            $script:evidence.Add([pscustomobject]@{ orphanHookCount=$count; refusedBeforeInstallation=$true; installDirNotCreated=$true; configurationAndHooksUnchanged=$true; storeFileCount=$storeFiles.Count; storeHistoryAndPayloadUnchanged=$true; userPathUnchanged=$true; processPathUnchanged=$true })
+        }
     }
 
     Invoke-Case 'uninstall refuses to overwrite configuration edited after installation' {

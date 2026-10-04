@@ -24,6 +24,9 @@ function Write-HookDecision {
 }
 
 try {
+    if ([Environment]::OSVersion.Platform -ne [PlatformID]::Win32NT) {
+        throw 'This MVP supports Windows only. Linux and macOS are unsupported; no deletion or recovery was attempted.'
+    }
     if ($Action -in @('off','on','status')) {
         $result = 'UNKNOWN'
         try {
@@ -77,7 +80,9 @@ try {
             if ([IO.Path]::IsPathRooted([string]$data.workdir)) { $working = [IO.Path]::GetFullPath([string]$data.workdir) }
             else { $working = [IO.Path]::GetFullPath((Join-Path $cwd ([string]$data.workdir))) }
         }
-        $plan = Get-SafeDeleteCommandPlan -Command $shellCommand -WorkingDirectory $working -ProjectRoot $root
+        $shellHint = ''
+        if ($data.PSObject.Properties['shell'] -and $data.shell) { $shellHint = [string]$data.shell }
+        $plan = Get-SafeDeleteCommandPlan -Command $shellCommand -WorkingDirectory $working -ProjectRoot $root -Shell $shellHint
         if ($plan.action -eq 'allow') { Write-HookDecision; exit 0 }
         $notice = ([char]0x26A0).ToString() + ' Codex SafeDelete'
         if ($plan.action -eq 'deny') {

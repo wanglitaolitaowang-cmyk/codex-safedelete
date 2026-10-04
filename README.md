@@ -73,7 +73,7 @@ and PATH. Both preserve previously saved project trash and history.
 
 ```text
 Codex tries:
-rm -rf src/
+Remove-Item -Recurse -Force src/
 
 SafeDelete:
 BLOCKED → moved to recoverable trash
@@ -91,6 +91,16 @@ MIT licensed.
 | Codex CLI 0.160.0 with a local `codex.exe` | Real Hook → trash → undo → uninstall verified |
 | Codex Desktop 26.930.3930.0 | Real install, full restart, deletion interception, undo and default uninstall verified |
 | Mixed PowerShell 5.1 / 7 and Windows code pages 936 / 65001 | Unicode paths, binary bytes and empty directories verified |
+| Windows 7 / 8, or Windows 10 before 1809 | Codex integration is unsupported; installation stops before changing configuration |
+| Linux / macOS | No installer or platform adaptation yet; not supported by this release |
+
+The full Desktop exit/restart results are from an earlier run. This MVP repair
+batch did not repeat the complete GUI restart sequence; see
+[TEST-RESULTS.md](TEST-RESULTS.md) for each run and retained failures.
+
+The installer requires Windows 10 version 1809 (build 17763) or newer and PowerShell 5.1 or
+newer. This follows [Codex's Windows requirements](https://developers.openai.com/codex/windows).
+Windows 11 is recommended by Codex; Windows 10 support is best effort.
 
 Pause/resume, persistence after full Desktop restarts, recovery of earlier
 records and default uninstall are also verified. This machine's Desktop run
@@ -110,6 +120,24 @@ finishes, first double-click `Uninstall SafeDelete.cmd` to remove the leftover
 installation, then double-click `Install SafeDelete.cmd` to retry. Cleanup keeps
 configuration and PATH changes made after rollback. If rollback is incomplete,
 inspect the error and preserved backups before retrying.
+
+Repeating installation verifies the existing program; it does not upgrade its
+files. If this checkout's program files differ, installation stops without
+changing the existing installation. Use `Uninstall SafeDelete.cmd` from the
+original version, then install the new version. Project trash and history are
+preserved during uninstall.
+
+For the same Windows user, installation and uninstall cannot run concurrently
+against the same installation folder or Codex configuration. If either is busy,
+this invocation stops without making changes. Wait for the other operation to
+finish, then retry.
+
+Installation does not append another SafeDelete hook when registration exists
+without matching installation state. It stops before changing files. Hook
+verification folds identical reports of the same key; distinct registrations
+or conflicting metadata produce an error with the relevant source and keys.
+Use the original uninstaller for an existing installation. Preserve the error
+and configuration backup when installation state is missing or incomplete.
 
 Advanced users can install from PowerShell in the extracted project folder:
 
@@ -151,18 +179,30 @@ not pause to work around a denied delete.
 For versions installed before pause support, use the original uninstaller
 before installing this version; the installer does not silently overwrite them.
 
-Recognized commands: `rm`, `del`, `erase`, `rmdir`, `rd`, `Remove-Item` and their
-literal shell wrappers. Their original execution is replaced by the local
-SafeDelete CLI, which moves literal targets in the actual working directory.
+Automatic recovery supports literal PowerShell deletion commands. With the
+default Windows shell, use `Remove-Item`; ambiguous aliases such as `rm`, `del`,
+`erase`, `rmdir` and `rd` require explicit PowerShell shell metadata or a
+`powershell -NoProfile -Command` / `pwsh -NoProfile -Command` wrapper. Otherwise
+they are denied. PowerShell wrappers must include `-NoProfile` for automatic
+recovery. Directory options (`-WorkingDirectory` / `-wd`), dynamic or unknown
+startup options, and unsupported deletion options are denied. Set the tool's
+`workdir` to choose the working directory.
+The original execution is replaced by the local SafeDelete CLI, which moves
+literal targets in the actual working directory. Bash, sh, CMD and WSL deletion
+is denied; use `safedelete delete` from a Windows PowerShell terminal.
 `git clean` and `git reset --hard` are always denied.
 Project roots, paths outside the project, `.git`, `.env`, `.ssh`, the recovery
-store, `.codex`, links/junctions and batches exceeding **1000 files or directories** are denied.
+store, `.codex`, links/junctions, case-sensitive Windows directories and batches
+exceeding **1000 files or directories** are denied. If directory semantics cannot
+be confirmed, including on some network shares, the command is denied.
 Directories containing protected paths are also denied. Wildcards, dynamic
 deletion paths and commands mixing deletion with other work are denied; split
 the commands or use `safedelete delete` with explicit paths.
 
 Ordinary `git status`, `npm test` and source edits pass through.
 Opaque shell scripts, encoded commands and interactive shells are also denied.
+The Hook denies the original command if its checks fail or exceed the 20-second
+budget; it does not silently continue after a slow disk or worker failure.
 Explicit `apply_patch` Delete File directives are denied; use `safedelete delete`
 first. Ordinary patches continue to work.
 The project is discovered from `.git` or the nearest recovery store; otherwise

@@ -3,6 +3,101 @@
 Tested locally on **2026-10-04 (UTC+08:00)**. Windows build 22631 (23H2),
 Codex CLI **0.160.0**, Git 2.55.0. Production code uses PowerShell and .NET only.
 
+## Windows MVP environment and installation repairs — 2026-10-04
+
+The final MVP verification passed **483/483 checks**, with zero skips. This
+counts the 20 PowerShell suites below plus three cross-runtime checks and two
+real-console code-page checks. Windows build 22631, non-administrator access,
+Windows PowerShell **5.1.22621.5909**, PowerShell **7.6.5** and Codex CLI
+**0.160.0** were used. Repeated verification is not counted twice.
+
+| Suite | PowerShell 5.1 | PowerShell 7 |
+| --- | --- | --- |
+| Installation acceptance and rollback | 43/43 PASS | 43/43 PASS |
+| Protection switch and configuration lifecycle | 27/27 PASS | 27/27 PASS |
+| Storage faults and interrupted recovery | 19/19 PASS | 19/19 PASS |
+| Runtime preflight | 9/9 PASS | 9/9 PASS |
+| Hook registration, duplicate reports and conflicts | 44/44 PASS | 44/44 PASS |
+| Shell selection and deletion wrappers | 44/44 PASS | 44/44 PASS |
+| Windows filesystem checks | 6/6 PASS | 6/6 PASS |
+| Hook watchdog and response validation | 39/39 PASS | 39/39 PASS |
+| Installation filesystem preflight and partial-copy failure | 5/5 PASS | 5/5 PASS |
+| Positive Hook health verification | 3/3 PASS | 3/3 PASS |
+
+The complete reports and JSONL evidence were parsed independently: 478 PASS
+cases, 26 parsed files, zero parsing errors, and 19/19 frozen source hashes
+matched. Review found an acceptance assertion checking `history.jsonl` instead
+of the real `history.json`. After correcting that assertion, both complete
+acceptance suites passed again, 86/86; their six evidence files parsed without
+errors and all 19 final source hashes matched. Comparing the two runs confirmed
+that only this test assertion changed; production code remained identical.
+
+The installer now refuses orphaned registration, stale program files, malformed
+or locked configuration, and concurrent installation/uninstall before writing.
+Failed preparation cleans only its own files and preserves unexpected residuals.
+Duplicate API reports are folded only when their key and metadata match exactly;
+distinct or conflicting registrations retain a diagnostic with source and keys.
+The original screenshot's exact two-registration state was not reproduced on
+this machine; these cases were reproduced separately in isolated fixtures.
+
+Ambiguous aliases without shell information are denied. An explicit PowerShell
+shell or a `-NoProfile -Command` wrapper is required for automatic deletion
+recovery. Wrappers with startup-directory arguments or unknown/dynamic flags are
+denied before selecting targets; tests preserve same-named files in both
+directories. POSIX, CMD and WSL commands use their own conservative checks.
+
+The Hook has a 20-second monotonic budget inside the registered 30-second Codex
+timeout. Watchdog faults emit structured denial. Positive health verification
+requires the specific successful root-protection result; a generic fault denial
+does not establish ON. Tests use a shortened 2.5-second budget for timeout
+fixtures and include production-module ON/OFF behavior. Retained failures exposed
+PS5's additional inherited stdout handle, which kept Codex's pipe open after
+the parent exited. The corrected PS5 worker inherits only its three explicit
+pipe handles. PS5/PS7 descendant tests closed the SDK pipe in about 2.8 seconds;
+separate real-module checks passed 12/12 across PS5 x64, PS5 x86 and PS7.
+
+Cross-runtime recovery passed 3/3, with binary bytes and empty directories
+restored in both directions and unreadable sources refused. Real-console
+code-page tests passed 2/2 under 936 and 65001; Chinese, spaces, apostrophes and
+emoji names retained exact binary content. Isolated installations were removed.
+
+The local installed program was backed up and repaired after verification.
+Eleven source-controlled installed files matched their source hashes. The actual
+`Install SafeDelete.cmd` invocation returned exit 0 and its success marker, with
+no error lines. An installed-command smoke check moved and restored two targets,
+including binary data and an empty directory. There is exactly one registered
+SafeDelete Hook. Protection is **ON**; Codex configuration/hooks and User PATH
+remained unchanged throughout these verified operations.
+
+These results establish the tested Windows MVP boundary. Windows 7/8 and
+pre-1809 Windows 10 are refused; Linux/macOS are not implemented. Eight runtime
+cases per suite simulate version/platform boundaries rather than running those
+systems. Filesystem suites include two native directory queries (ordinary and
+over-300-character paths) and four injected refusal cases. They do not establish
+complete long-path delete/undo or real case-sensitive-directory support. Network
+shares, FAT/exFAT, other Codex versions, independent Windows 10 machines and other
+antivirus environments remain unverified. The full Desktop GUI exit/restart
+sequence was not repeated for this batch; earlier results below are historical.
+
+Local evidence (ignored by Git):
+
+- Full run and independent audit: `tests/.work/mvp-final-20261004-205622-36f045c5/{verification,audit}.json`
+- Corrected acceptance rerun: `tests/.work/mvp-acceptance-20261004-210415-26108123/{verification,audit}.json`
+- Cross-runtime: `tests/.work/mvp-cross-runtime/compatibility-20261004-130137-0bae6c9c/report.json`
+- Code pages: `tests/.work/codepage-compatibility-20261004-210209-96576143/report.json`
+- Local repair backup and source proof: `work/local-install-update-20261004-210507/`
+- Actual installer CMD: `tests/.work/install-click-20261004-210513/report.json`
+- Installed delete/undo: `tests/.work/installed-mvp-smoke-20261004-210522/report.json`
+- Aggregate: `work/mvp-completion-20261004.json`
+- Retained failed runs: `tests/.work/mvp-final-20261004-203145-592c140d/verification.json` (454/458) and `tests/.work/mvp-final-20261004-204144-8687ed90/verification.json` (77/78).
+
+Reproduce with the existing acceptance/protection/storage/compatibility/code-page
+scripts and `tests/runtime-compatibility.ps1`, `tests/hook-registration.ps1`,
+`tests/shell-compatibility.ps1`, `tests/windows-filesystem.ps1`,
+`tests/hook-watchdog.ps1`, `tests/install-preflight.ps1` and
+`tests/hook-selfcheck.ps1`. Installation suites use isolated Codex homes and
+`-NoPathUpdate`; code-page verification requires a real Windows console.
+
 ## Release repairs and compatibility — 2026-10-04
 
 The final repair run passed **171/171 checks**, with no skips. It used Windows

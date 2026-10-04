@@ -49,6 +49,95 @@ function Test-SDExists {
     catch [System.Management.Automation.ItemNotFoundException] { return $false }
 }
 
+function Get-SDWindowsDirectoryCaseSensitivity {
+    param([Parameter(Mandatory = $true)][string]$Path)
+    if ([Environment]::OSVersion.Platform -ne [PlatformID]::Win32NT) {
+        return [pscustomobject]@{ Confirmed=$false; CaseSensitive=$false; Method='unknown'; ErrorCode=0; Reason='This Windows filesystem guard does not support Linux or macOS.' }
+    }
+    try {
+        if (-not ('CodexSafeDelete.WindowsDirectoryCase' -as [type])) {
+            Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+using System.Text;
+using Microsoft.Win32.SafeHandles;
+namespace CodexSafeDelete {
+    public sealed class WindowsCaseResult {
+        public bool Confirmed;
+        public bool CaseSensitive;
+        public string Method;
+        public int ErrorCode;
+        public string Reason;
+    }
+    public static class WindowsDirectoryCase {
+        [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)]
+        static extern SafeFileHandle CreateFileW(string path, uint access, uint share, IntPtr security, uint disposition, uint flags, IntPtr template);
+        [DllImport("kernel32.dll", SetLastError=true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        static extern bool GetFileInformationByHandleEx(SafeFileHandle handle, int infoClass, out uint flags, uint size);
+        [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        static extern bool GetVolumePathNameW(string path, StringBuilder root, uint size);
+        [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        static extern bool GetVolumeInformationW(string root, StringBuilder name, uint nameSize, out uint serial, out uint componentLength, out uint flags, StringBuilder filesystem, uint filesystemSize);
+        static WindowsCaseResult Unknown(int error, string reason) {
+            return new WindowsCaseResult { Confirmed=false, CaseSensitive=false, Method="unknown", ErrorCode=error, Reason=reason };
+        }
+        static string NativePath(string path) {
+            // The caller supplies an already normalized absolute DOS/UNC path.
+            // Only the native API receives a long-path prefix; user namespaces
+            // remain rejected by Get-SDAbsolutePath and by this boundary.
+            if (String.IsNullOrEmpty(path)) return null;
+            path=path.Replace('/','\\');
+            if (path.StartsWith(@"\\?\",StringComparison.Ordinal) || path.StartsWith(@"\\.\",StringComparison.Ordinal)) return null;
+            if (path.Length>=3 && ((path[0]>='A' && path[0]<='Z') || (path[0]>='a' && path[0]<='z')) && path[1]==':' && path[2]=='\\') return @"\\?\"+path;
+            if (path.StartsWith(@"\\",StringComparison.Ordinal)) {
+                int share=path.IndexOf('\\',2);
+                if (share>2 && share<path.Length-1) return @"\\?\UNC\"+path.Substring(2);
+            }
+            return null;
+        }
+        static WindowsCaseResult VolumeFallback(string path, int queryError) {
+            StringBuilder root=new StringBuilder(32768);
+            if (!GetVolumePathNameW(path,root,(uint)root.Capacity)) return Unknown(Marshal.GetLastWin32Error(),"GetVolumePathNameW failed.");
+            uint serial, componentLength, volumeFlags;
+            StringBuilder filesystem=new StringBuilder(256);
+            if (!GetVolumeInformationW(root.ToString(),null,0,out serial,out componentLength,out volumeFlags,filesystem,(uint)filesystem.Capacity)) return Unknown(Marshal.GetLastWin32Error(),"GetVolumeInformationW failed.");
+            // FILE_CASE_SENSITIVE_SEARCH proves the actual volume's capability.
+            // Never infer the behavior of FAT/exFAT, NTFS, or a share by name.
+            if ((volumeFlags & 1)==0) return new WindowsCaseResult { Confirmed=true, CaseSensitive=false, Method="volume-capability", ErrorCode=0, Reason="Volume does not support case-sensitive searches." };
+            return Unknown(queryError,"Directory case sensitivity is unavailable and the volume supports case-sensitive searches.");
+        }
+        public static WindowsCaseResult Query(string path) {
+            string nativePath=NativePath(path);
+            if (nativePath==null) return Unknown(87,"An absolute DOS or UNC directory path is required.");
+            // FILE_READ_ATTRIBUTES; share read/write/delete; OPEN_EXISTING;
+            // BACKUP_SEMANTICS and OPEN_REPARSE_POINT. No filesystem writes.
+            using (SafeFileHandle handle=CreateFileW(nativePath,0x80,7,IntPtr.Zero,3,0x02200000,IntPtr.Zero)) {
+                if (handle.IsInvalid) return Unknown(Marshal.GetLastWin32Error(),"CreateFileW could not read directory attributes.");
+                uint flags;
+                if (GetFileInformationByHandleEx(handle,23,out flags,4)) {
+                    if ((flags & 1)!=0) return new WindowsCaseResult { Confirmed=true, CaseSensitive=true, Method="directory-flag", ErrorCode=0, Reason="Directory has FILE_CS_FLAG_CASE_SENSITIVE_DIR." };
+                    if (flags!=0) return Unknown(0,"Directory case information contains unsupported flags.");
+                    return new WindowsCaseResult { Confirmed=true, CaseSensitive=false, Method="directory-flag", ErrorCode=0, Reason="Directory case-sensitive flag is disabled." };
+                }
+                int error=Marshal.GetLastWin32Error();
+                // Only an unsupported information class permits a volume fallback.
+                if (error==1 || error==50 || error==87) return VolumeFallback(nativePath,error);
+                return Unknown(error,"GetFileInformationByHandleEx could not confirm directory case sensitivity.");
+            }
+        }
+    }
+}
+'@
+        }
+        return [CodexSafeDelete.WindowsDirectoryCase]::Query($Path)
+    } catch {
+        return [pscustomobject]@{ Confirmed=$false; CaseSensitive=$false; Method='unknown'; ErrorCode=0; Reason=('Native Windows directory case query is unavailable: ' + $_.Exception.Message) }
+    }
+}
+
 function Assert-SDNoReparse {
     param([string]$Path)
     $cursor = $Path
@@ -57,6 +146,15 @@ function Assert-SDNoReparse {
             $item = Get-SDItem $cursor
             if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
                 throw "DENY: a path or its parent is a reparse point: $cursor"
+            }
+            if ($item.PSIsContainer) {
+                $caseInfo = Get-SDWindowsDirectoryCaseSensitivity $item.FullName
+                if (-not $caseInfo.Confirmed) {
+                    throw "DENY: cannot reliably confirm Windows directory case sensitivity: $cursor (native error $($caseInfo.ErrorCode)). $($caseInfo.Reason)"
+                }
+                if ($caseInfo.CaseSensitive) {
+                    throw "DENY: case-sensitive Windows directories are unsupported: $cursor"
+                }
             }
         }
         $parent = [IO.Directory]::GetParent($cursor)

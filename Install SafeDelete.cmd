@@ -5,6 +5,10 @@ set "safedelete_pushed="
 if not "%OS%"=="Windows_NT" goto unsupported
 set "safedelete_powershell=%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe"
 if not exist "%safedelete_powershell%" goto unsupported
+"%safedelete_powershell%" -NoLogo -NoProfile -NonInteractive -Command "if ($PSVersionTable.PSVersion -lt [version]'5.1') { Write-Output 'Windows PowerShell 5.1 is required. No configuration was changed.'; exit 1 }; if ([Environment]::OSVersion.Version.Build -lt 17763) { Write-Output 'Codex integration requires Windows 10 version 1809 or newer. Windows 7 and 8 are not supported. No configuration was changed.'; exit 1 }"
+set "safedelete_exit=%errorlevel%"
+if not "%safedelete_exit%"=="0" goto failed
+set "safedelete_exit=1"
 pushd "%~dp0"
 if errorlevel 1 goto location_failed
 set "safedelete_pushed=1"
