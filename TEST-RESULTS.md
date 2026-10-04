@@ -10,24 +10,44 @@ Codex CLI **0.160.0**, Git 2.55.0. Production code uses PowerShell and .NET only
 | Storage fault and tamper tests | Windows PowerShell 5.1.22621.5909 | 8/8 PASS |
 | Storage fault and tamper tests | PowerShell 7.6.5 | 8/8 PASS |
 | Real Codex install → hooks → safe delete → undo → uninstall | Codex 0.160.0 / Windows PowerShell | PASS |
-| Desktop E2E release gate | Windows Codex Desktop | NOT RUN: complete restart and real Desktop deletion/recovery not yet completed |
+| Desktop deletion and recovery | Windows Codex Desktop 26.930.3930.0 | PASS: file and recursive directory deletion intercepted; both restored with original bytes |
+| Desktop danger commands | Windows Codex Desktop 26.930.3930.0 | 5/5 DENY; fixture bytes unchanged |
+| Desktop E2E release gate | Windows Codex Desktop 26.930.3930.0 | FAIL: initial uninstall refused changed configuration; cleanup PASS after reviewed merge |
 
-The release review identified Windows Codex Desktop package **26.930.3930.0**.
-Its window and standard accessibility controls are accessible, but this review
-agent runs under the Desktop process. A complete exit terminates the reviewer.
-The current session has not demonstrated reliable unattended restart and
-continuation. A manual restart and resumed Desktop test are required before
-this gate can be marked PASS. This is an incomplete validation, not evidence
-that Desktop does not support the Hook.
+The Desktop review used the real default user installation. `install.ps1`
+exited 0, registered an enabled/trusted Hook and passed its runtime check.
+The operator completely exited and reopened Desktop. All 11 prior Desktop
+processes were gone; the resumed agent then issued the actual deletion commands.
+Original configuration and User PATH checksums were saved locally.
 
-The real default installation has now succeeded as part of this Desktop review:
-`install.ps1` exited 0, reported an enabled/trusted Hook, and passed its exact
-Hook-command runtime check. Original configuration and user PATH checksums were
-saved locally. Complete Desktop restart, file/directory recovery, danger-command
-checks and real uninstall verification remain pending; installation alone is
-not a Desktop E2E PASS.
+The real Desktop agent ran `Remove-Item` against a synthetic `test.txt`, then
+`Remove-Item -Recurse -Force` against a synthetic directory containing two files
+at different depths. The Hook replaced both commands with SafeDelete, the
+original paths disappeared and all original bytes remained in recoverable
+trash. Actual `safedelete undo` commands restored both at their original paths;
+history marked both records restored and the trash payloads were gone.
 
-The real Codex test uses a fixed model fixture served only on loopback. No
+Actual Desktop commands `Remove-Item -Recurse -Force .`, deletion of `.git`,
+deletion of `.env`, `git clean -fd` and `git reset --hard` were each rejected
+by the PreToolUse Hook. All synthetic fixture bytes remained unchanged.
+Tests used only local fixtures, including a synthetic `.git`; no real project
+metadata or user files were selected for deletion.
+
+Desktop restart changed its `SKY_CUA_NATIVE_PIPE_DIRECTORY` MCP configuration
+value. A full TOML comparison found this was the only change unrelated to
+SafeDelete. Replacing that one value in a local candidate reproduced the exact
+installed configuration hash. The actual independent PowerShell uninstall exited 1.
+It refused the changed configuration and left it untouched. Agent invocation
+of `uninstall.ps1` was also denied by the documented opaque-script rule.
+After a reviewed merge of that one Desktop-generated value, the unchanged
+uninstaller exited 0. Original `config.toml` bytes and User PATH matched
+their pre-install checksums; the newly created `hooks.json` and installation
+directory were absent. Project recovery history was retained.
+The complete Desktop E2E is FAIL because default uninstall required this
+manual merge. This is an uninstall limitation; Desktop deletion Hook and
+recovery were verified. Production scripts remain unchanged.
+
+The isolated CLI integration test uses a fixed model fixture served only on loopback. No
 remote model, authentication or user files are used. Non-local proxy traffic is
 blocked. The isolated CLI uses `danger-full-access` because nesting the Windows
 Codex sandbox was unavailable; Hook trust is enabled normally and never bypassed.
@@ -84,6 +104,12 @@ Final local evidence (ignored by Git; full output stays on this machine):
 - `tests/.work/20261004-132216-5-ecd32dea/results.jsonl` and `summary.json`
 - `tests/.work/20261004-132217-7-6e5e2c81/results.jsonl` and `summary.json`
 - `tests/.work/20261004-132041-7-0de54104/summary.json` (missing-npm audit)
+- `work/desktop-final/restart.json`
+- `work/desktop-final/file-delete.json` and `file-undo.json`
+- `work/desktop-final/folder-delete.json` and `folder-undo.json`
+- `work/desktop-final/danger-commands.json`
+- `work/desktop-final/config-change.json` (private configuration snapshots are also ignored)
+- `work/desktop-final/uninstall-result.json` and `report.json`
 
 To repeat:
 
@@ -104,7 +130,7 @@ to each acceptance command. The downloaded archive is not committed.
 The real Codex test needs Python 3 (standard library only) and a local `codex.exe`.
 These are test tools, not production dependencies.
 
-Not tested: a separate Windows 10 machine, Desktop UI end to end, npm's
+Not tested: a separate Windows 10 machine, npm's
 `codex.cmd` launcher, other command shells and arbitrary indirect deletion
 programs. This tool is not an OS sandbox or a backup system.
 
