@@ -32,7 +32,7 @@ MIT licensed.
 | --- | --- |
 | PowerShell 5.1 / 7 on Windows build 22631 (23H2) | Verified; a separate Windows 10 machine has not been tested |
 | Codex CLI 0.160.0 with a local `codex.exe` | Real Hook → trash → undo → uninstall verified |
-| Codex Desktop 26.930.3930.0 | Delete interception and undo verified after a full restart; full E2E FAIL: default uninstall configuration conflict |
+| Codex Desktop 26.930.3930.0 | Delete/undo previously verified; full E2E retest pending after the narrow uninstall fix |
 
 Download the project and run the install command above in its folder.
 
@@ -94,10 +94,9 @@ The installer preserves existing hooks and backs up the original Codex
 configuration byte for byte. Uninstall restores it and removes its PATH entry;
 project trash stays available. If configuration or PATH was changed afterward,
 uninstall stops before overwriting those changes and points to the backups.
-In Desktop 26.930.3930.0, restarting changed a local MCP pipe configuration value
-and triggered this guard. A reviewed configuration merge is required before
-uninstalling. This review completed cleanup after that merge, but default
-Desktop E2E remains FAIL.
+Desktop's temporary `codex-computer-use` named-pipe GUID rotation is accepted
+only if restoring that value in memory reproduces the complete installed
+configuration hash. Other configuration or PATH changes still stop uninstall.
 
 See [TEST-RESULTS.md](TEST-RESULTS.md) for actual runs, commands and limits.
 Node/npm and Python are test tools only; the product needs neither.

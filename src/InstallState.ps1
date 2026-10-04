@@ -91,6 +91,51 @@ function Assert-SafeDeleteInstallState {
     if (@($State.files | Where-Object { $_ -notin $allowed }).Count -gt 0) { throw 'Invalid installation file manifest.' }
 }
 
+function Test-SafeDeleteDesktopPipeChange {
+    param($Snapshot, [string]$InstallDir)
+    if ($Snapshot.name -cne 'config.toml' -or -not $Snapshot.existed -or
+        $Snapshot.installed_hash -notmatch '^[0-9A-Fa-f]{64}$') { return $false }
+    $backup = Join-Path $InstallDir 'backup\config.toml'
+    Assert-SafeDeleteInstallPath $backup
+    if ((Get-SafeDeleteFileHash $backup) -ne $Snapshot.original_hash) { throw 'Backup checksum mismatch: config.toml' }
+    if (-not [IO.File]::Exists($Snapshot.path) -or
+        (Get-Item -LiteralPath $Snapshot.path).Length -gt 1048576 -or
+        (Get-Item -LiteralPath $backup).Length -gt 1048576) { return $false }
+    try {
+        $encoding = New-Object Text.UTF8Encoding($false, $true)
+        $texts = @($encoding.GetString([IO.File]::ReadAllBytes($backup)),
+                   $encoding.GetString([IO.File]::ReadAllBytes($Snapshot.path)))
+        $values = @()
+        $sections = @()
+        $valueTokens = @()
+        foreach ($text in $texts) {
+            # This narrow exception is not a TOML parser. Ambiguity stays denied.
+            if ($text.Contains('"""') -or $text.Contains("'''")) { return $false }
+            if ([regex]::Matches($text, 'SKY_CUA_NATIVE_PIPE_DIRECTORY').Count -ne 1) { return $false }
+            $key = [regex]::Matches($text, '(?m)^[ \t]*SKY_CUA_NATIVE_PIPE_DIRECTORY[ \t]*=[ \t]*(?<value>"(?:\\[^\r\n]|[^"\\\r\n])*"|''[^''\r\n]*'')[ \t]*(?:#[^\r\n]*)?\r?$')
+            if ($key.Count -ne 1) { return $false }
+            $headers = [regex]::Matches($text.Substring(0, $key[0].Index), '(?m)^[ \t]*(?<table>\[[^\r\n]*\])[ \t]*(?:#[^\r\n]*)?\r?$')
+            if ($headers.Count -eq 0) { return $false }
+            $table = $headers[$headers.Count - 1].Groups['table'].Value
+            if ($table -cnotmatch '^\[mcp_servers\.[A-Za-z0-9_-]+\.env\]$') { return $false }
+            $token = $key[0].Groups['value']
+            $value = if ($token.Value.StartsWith('"')) { $token.Value | ConvertFrom-Json }
+                     else { $token.Value.Substring(1, $token.Value.Length - 2) }
+            if ($value -isnot [string] -or $value -cnotmatch '^\\\\\.\\pipe\\codex-computer-use-[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$') { return $false }
+            $values += $token.Value
+            $sections += $table
+            $valueTokens += $token
+        }
+        if ($sections[0] -cne $sections[1] -or $values[0][0] -cne $values[1][0]) { return $false }
+        # Replace only the value in memory. Every other byte must still match.
+        $candidate = $texts[1].Remove($valueTokens[1].Index, $valueTokens[1].Length).Insert($valueTokens[1].Index, $values[0])
+        $sha = [Security.Cryptography.SHA256]::Create()
+        try { $hash = [BitConverter]::ToString($sha.ComputeHash($encoding.GetBytes($candidate))).Replace('-', '') }
+        finally { $sha.Dispose() }
+        return $hash -eq $Snapshot.installed_hash
+    } catch { return $false }
+}
+
 function Restore-SafeDeleteConfiguration {
     param($State, [string]$InstallDir)
     Assert-SafeDeleteInstallState $State $InstallDir

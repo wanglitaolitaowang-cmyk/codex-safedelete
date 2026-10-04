@@ -18,7 +18,10 @@ Assert-SafeDeleteInstallPath $state.codex_home
 if ($state.phase -eq 'complete') {
     foreach ($snapshot in $state.snapshots) {
         Assert-SafeDeleteInstallPath $snapshot.path
-        if ((Get-SafeDeleteFileHash $snapshot.path) -ne $snapshot.installed_hash) { throw ('Codex configuration changed after installation: ' + $snapshot.path + '. Backups are in ' + (Join-Path $InstallDir 'backup') + '; merge those changes before uninstalling. Nothing was overwritten.') }
+        if ((Get-SafeDeleteFileHash $snapshot.path) -ne $snapshot.installed_hash -and
+            -not (Test-SafeDeleteDesktopPipeChange -Snapshot $snapshot -InstallDir $InstallDir)) {
+            throw ('Codex configuration changed after installation: ' + $snapshot.path + '. Backups are in ' + (Join-Path $InstallDir 'backup') + '; merge those changes before uninstalling. Nothing was overwritten.')
+        }
     }
     if ($state.path_updated -and [Environment]::GetEnvironmentVariable('Path','User') -ne $state.installed_user_path) { throw 'User PATH changed after installation. Nothing was overwritten; inspect install-state.json before uninstalling.' }
 }

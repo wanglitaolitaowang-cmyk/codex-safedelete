@@ -17,6 +17,7 @@ $commands = Join-Path $SourceRoot 'src\Commands.ps1'
 if (-not (Test-Path -LiteralPath $cli -PathType Leaf)) { throw "Missing CLI: $cli" }
 if (-not (Test-Path -LiteralPath $commands -PathType Leaf)) { throw "Missing parser: $commands" }
 . $commands
+. (Join-Path $SourceRoot 'src\InstallState.ps1')
 
 $runId = '{0}-{1}-{2}' -f (Get-Date -Format 'yyyyMMdd-HHmmss'), $PSVersionTable.PSVersion.Major, ([guid]::NewGuid().ToString('N').Substring(0, 8))
 $runRoot = Join-Path ([IO.Path]::GetFullPath($ArtifactRoot)) $runId
@@ -233,6 +234,34 @@ function Invoke-Case([string]$Name, [scriptblock]$Test, [string]$SkipReason = ''
     $script:results.Add($record)
     [IO.File]::AppendAllText($resultPath, ($record | ConvertTo-Json -Depth 16 -Compress) + [Environment]::NewLine, (New-Object Text.UTF8Encoding($false)))
     Write-Host ('{0}: {1}{2}' -f $status, $Name, $(if ($message) { ' - ' + $message } else { '' }))
+}
+
+function Assert-PipeGuard {
+    param([string]$Name, [byte[]]$OriginalBytes, [byte[]]$InstalledBytes, [byte[]]$CurrentBytes, [bool]$Expected, [switch]$CorruptBackup)
+    $root = New-Fixture ('pipe-guard-' + $Name)
+    $installDir = Join-Path $root 'installed'
+    $backup = Join-Path $installDir 'backup\config.toml'
+    $config = Join-Path $root 'codex-home\config.toml'
+    [void][IO.Directory]::CreateDirectory((Split-Path -Parent $backup))
+    [void][IO.Directory]::CreateDirectory((Split-Path -Parent $config))
+    [IO.File]::WriteAllBytes($backup, $OriginalBytes)
+    [IO.File]::WriteAllBytes($config, $InstalledBytes)
+    $snapshot = [pscustomobject]@{ name='config.toml'; path=$config; existed=$true; original_hash=(Get-SafeDeleteFileHash $backup); installed_hash=(Get-SafeDeleteFileHash $config) }
+    [IO.File]::WriteAllBytes($config, $CurrentBytes)
+    if ($CorruptBackup) { [IO.File]::AppendAllText($backup, '# damaged backup') }
+    $currentHash = Get-SafeDeleteFileHash $config
+    $backupHash = Get-SafeDeleteFileHash $backup
+    $allowed = $false
+    $threw = $false
+    try { $allowed = Test-SafeDeleteDesktopPipeChange -Snapshot $snapshot -InstallDir $installDir }
+    catch { $threw = $true }
+    $unchanged = (Get-SafeDeleteFileHash $config) -eq $currentHash
+    $backupUnchanged = (Get-SafeDeleteFileHash $backup) -eq $backupHash
+    $script:evidence.Add([pscustomobject]@{ check=$Name; expected=$Expected; allowed=$allowed; threw=$threw; configurationUnchanged=$unchanged; backupUnchanged=$backupUnchanged })
+    Assert-True ($allowed -eq $Expected) ("Pipe guard returned an unexpected decision: $Name")
+    Assert-True ($unchanged -and $backupUnchanged) ("Pipe guard modified configuration or backup: $Name")
+    if ($Expected) { Assert-True (-not $threw) ("Pipe guard threw for a valid rotation: $Name") }
+    if ($CorruptBackup) { Assert-True $threw 'Pipe guard did not report the damaged backup checksum' }
 }
 
 $sourceHashes = @(Get-ProgramHashes)
@@ -510,6 +539,59 @@ Invoke-Case -Name 'actual npm test executes local test script' -SkipReason $npmS
     Assert-True ((Test-Path -LiteralPath $marker -PathType Leaf) -and [IO.File]::ReadAllText($marker) -eq 'ran') 'npm test did not actually execute the Node test script'
 }
 
+Invoke-Case 'Desktop pipe rotation guard preserves UTF-8 BOM and line endings' {
+    $oldPipe = '\\.\pipe\codex-computer-use-11111111-1111-4111-8111-111111111111'
+    $newPipe = '\\.\pipe\codex-computer-use-22222222-2222-4222-8222-222222222222'
+    $original = "# local Desktop fixture`nmodel = `"gpt-6.1-sol`"`n[mcp_servers.desktop_fixture.env]`nSKY_CUA_NATIVE_PIPE_DIRECTORY = '" + $oldPipe + "' # generated`n"
+    $installed = $original + "`n[features]`nhooks = true`n"
+    foreach ($mode in @('lf', 'crlf', 'bom-crlf')) {
+        $before = $original
+        $expected = $installed
+        if ($mode -ne 'lf') { $before = $before.Replace("`n", "`r`n"); $expected = $expected.Replace("`n", "`r`n") }
+        $current = $expected.Replace($oldPipe, $newPipe)
+        $encoding = New-Object Text.UTF8Encoding($false)
+        $prefix = [byte[]]@()
+        if ($mode -eq 'bom-crlf') { $prefix = [byte[]]@(239,187,191) }
+        Assert-PipeGuard -Name $mode -OriginalBytes ([byte[]]($prefix + $encoding.GetBytes($before))) -InstalledBytes ([byte[]]($prefix + $encoding.GetBytes($expected))) -CurrentBytes ([byte[]]($prefix + $encoding.GetBytes($current))) -Expected $true
+    }
+    $script:evidence.Add([pscustomobject]@{ check_count=3; configurations_modified_by_guard=0 })
+}
+
+Invoke-Case 'Desktop pipe rotation guard refuses unrelated edits and ambiguous configuration' {
+    $oldPipe = '\\.\pipe\codex-computer-use-11111111-1111-4111-8111-111111111111'
+    $newPipe = '\\.\pipe\codex-computer-use-22222222-2222-4222-8222-222222222222'
+    $original = "# local Desktop fixture`nmodel = `"gpt-6.1-sol`"`n[mcp_servers.desktop_fixture.env]`nSKY_CUA_NATIVE_PIPE_DIRECTORY = '" + $oldPipe + "' # generated`n"
+    $installed = $original + "`n[features]`nhooks = true`n"
+    $rotated = $installed.Replace($oldPipe, $newPipe)
+    $encoding = New-Object Text.UTF8Encoding($false)
+    $cases = @(
+        [pscustomobject]@{ name='other-setting'; current=$rotated.Replace('gpt-6.1-sol','user-selected-model'); ambiguous='' },
+        [pscustomobject]@{ name='same-line-comment'; current=$rotated.Replace('# generated','# user change'); ambiguous='' },
+        [pscustomobject]@{ name='same-line-spacing'; current=$rotated.Replace('DIRECTORY =','DIRECTORY  ='); ambiguous='' },
+        [pscustomobject]@{ name='line-ending-change'; current=$rotated.Replace("`n","`r`n"); ambiguous='' },
+        [pscustomobject]@{ name='not-native-pipe'; current=$installed.Replace($oldPipe,'C:\local-fixture'); ambiguous='' },
+        [pscustomobject]@{ name='wrong-pipe-prefix'; current=$installed.Replace($oldPipe,'\\.\pipe\other-tool-22222222-2222-4222-8222-222222222222'); ambiguous='' },
+        [pscustomobject]@{ name='invalid-guid'; current=$installed.Replace($oldPipe,'\\.\pipe\codex-computer-use-invalid'); ambiguous='' },
+        [pscustomobject]@{ name='duplicate-key'; current=''; ambiguous=$original + "SKY_CUA_NATIVE_PIPE_DIRECTORY = '" + $oldPipe + "'`n" },
+        [pscustomobject]@{ name='key-in-comment'; current=''; ambiguous=$original + "# SKY_CUA_NATIVE_PIPE_DIRECTORY example`n" },
+        [pscustomobject]@{ name='wrong-table'; current=''; ambiguous=$original.Replace('[mcp_servers.desktop_fixture.env]','[unrelated.env]') },
+        [pscustomobject]@{ name='quoted-table'; current=''; ambiguous=$original.Replace('[mcp_servers.desktop_fixture.env]','[mcp_servers."desktop_fixture".env]') },
+        [pscustomobject]@{ name='quoted-key'; current=''; ambiguous=$original.Replace('SKY_CUA_NATIVE_PIPE_DIRECTORY =','"SKY_CUA_NATIVE_PIPE_DIRECTORY" =') },
+        [pscustomobject]@{ name='multiline-toml'; current=''; ambiguous=$original + "notes = " + ('"' * 3) + "`nfixture`n" + ('"' * 3) + "`n" }
+    )
+    foreach ($case in $cases) {
+        $before = $original
+        $expected = $installed
+        $current = $case.current
+        if ($case.ambiguous) { $before = $case.ambiguous; $expected = $before + "`n[features]`nhooks = true`n"; $current = $expected.Replace($oldPipe,$newPipe) }
+        Assert-PipeGuard -Name $case.name -OriginalBytes ($encoding.GetBytes($before)) -InstalledBytes ($encoding.GetBytes($expected)) -CurrentBytes ($encoding.GetBytes($current)) -Expected $false
+    }
+    Assert-PipeGuard -Name 'added-bom' -OriginalBytes ($encoding.GetBytes($original)) -InstalledBytes ($encoding.GetBytes($installed)) -CurrentBytes ([byte[]]([byte[]]@(239,187,191) + $encoding.GetBytes($rotated))) -Expected $false
+    Assert-PipeGuard -Name 'invalid-utf8' -OriginalBytes ($encoding.GetBytes($original)) -InstalledBytes ($encoding.GetBytes($installed)) -CurrentBytes ([byte[]]($encoding.GetBytes($rotated) + [byte[]]@(255))) -Expected $false
+    Assert-PipeGuard -Name 'damaged-backup' -OriginalBytes ($encoding.GetBytes($original)) -InstalledBytes ($encoding.GetBytes($installed)) -CurrentBytes ($encoding.GetBytes($rotated)) -Expected $false -CorruptBackup
+    $script:evidence.Add([pscustomobject]@{ check_count=($cases.Count + 3); configurations_modified_by_guard=0 })
+}
+
 if (-not $SkipInstall) {
     Invoke-Case 'isolated install, repeat install, and exact uninstall restoration' {
         $root = New-Fixture 'installation'
@@ -583,6 +665,69 @@ if (-not $SkipInstall) {
         Assert-True ($uninstalled.exitCode -eq 0) 'Uninstall still failed after fixture conflict was resolved'
         Assert-True ([IO.File]::ReadAllText($configPath) -eq "# original`r`n") 'Resolved uninstall did not restore original config'
         Assert-True (-not (Test-Path -LiteralPath (Join-Path $codexHome 'hooks.json'))) 'Uninstall left a hook configuration that did not exist before installation'
+    }
+    Invoke-Case 'Desktop pipe rotation uninstalls while user configuration, hooks, and PATH conflicts remain protected' {
+        $root = New-Fixture 'desktop-pipe-installation'
+        $codexHome = Join-Path $root 'codex-home'
+        $installDir = Join-Path $root 'installed'
+        [void][IO.Directory]::CreateDirectory($codexHome)
+        $configPath = Join-Path $codexHome 'config.toml'
+        $hooksPath = Join-Path $codexHome 'hooks.json'
+        $statePath = Join-Path $installDir 'install-state.json'
+        $encoding = New-Object Text.UTF8Encoding($false)
+        $oldPipe = '\\.\pipe\codex-computer-use-11111111-1111-4111-8111-111111111111'
+        $newPipe = '\\.\pipe\codex-computer-use-22222222-2222-4222-8222-222222222222'
+        $originalConfig = "# local Desktop fixture`r`nmodel = `"gpt-6.1-sol`"`r`n[mcp_servers.desktop_fixture]`r`ncommand = `"cmd.exe`"`r`nargs = [`"/d`", `"/c`", `"exit 0`"]`r`n[mcp_servers.desktop_fixture.env]`r`nSKY_CUA_NATIVE_PIPE_DIRECTORY = '" + $oldPipe + "'`r`n"
+        $originalHooks = '{"hooks":{"PreToolUse":[{"matcher":"^Read$","hooks":[{"type":"command","command":"Write-Output pre-existing"}]}]}}'
+        [IO.File]::WriteAllText($configPath, $originalConfig, $encoding)
+        [IO.File]::WriteAllText($hooksPath, $originalHooks, $encoding)
+        $originalBytes = [IO.File]::ReadAllBytes($configPath)
+        $originalHookBytes = [IO.File]::ReadAllBytes($hooksPath)
+        $userPathBefore = [Environment]::GetEnvironmentVariable('Path','User')
+        $installArgs = @('-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', (Join-Path $SourceRoot 'install.ps1'), '-CodexHome', $codexHome, '-InstallDir', $installDir, '-NoPathUpdate')
+        $installed = Invoke-Process -Program $ShellPath -Arguments $installArgs -WorkingDirectory $root
+        Assert-True ($installed.exitCode -eq 0) "Desktop pipe fixture installation failed (exit $($installed.exitCode)); see process evidence"
+        $installedText = $encoding.GetString([IO.File]::ReadAllBytes($configPath))
+        Assert-True ($installedText.Contains($oldPipe)) 'Installer unexpectedly changed the original Desktop pipe value'
+        $rotatedText = $installedText.Replace($oldPipe, $newPipe)
+        $rotatedBytes = $encoding.GetBytes($rotatedText)
+        $installedHookBytes = [IO.File]::ReadAllBytes($hooksPath)
+        $installedStateBytes = [IO.File]::ReadAllBytes($statePath)
+        $uninstallArgs = @('-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', (Join-Path $SourceRoot 'uninstall.ps1'), '-CodexHome', $codexHome, '-InstallDir', $installDir, '-NoPathUpdate')
+        $assertRefused = {
+            param([string]$Label)
+            $configHash = Get-SafeDeleteFileHash $configPath
+            $hooksHash = Get-SafeDeleteFileHash $hooksPath
+            $stateHash = Get-SafeDeleteFileHash $statePath
+            $backupHash = Get-SafeDeleteFileHash (Join-Path $installDir 'backup\config.toml')
+            $blocked = Invoke-Process -Program $ShellPath -Arguments $uninstallArgs -WorkingDirectory $root
+            Assert-True ($blocked.exitCode -ne 0) ("Uninstall ignored $Label conflict")
+            Assert-True ((Get-SafeDeleteFileHash $configPath) -eq $configHash) ("Uninstall overwrote configuration during $Label conflict")
+            Assert-True ((Get-SafeDeleteFileHash $hooksPath) -eq $hooksHash) ("Uninstall overwrote hooks during $Label conflict")
+            Assert-True ((Get-SafeDeleteFileHash $statePath) -eq $stateHash) ("Uninstall removed or modified state during $Label conflict")
+            Assert-True ((Get-SafeDeleteFileHash (Join-Path $installDir 'backup\config.toml')) -eq $backupHash) ("Uninstall removed or modified backup during $Label conflict")
+            Assert-True ([string]::Equals([Environment]::GetEnvironmentVariable('Path','User'), $userPathBefore, [StringComparison]::Ordinal)) 'Uninstall conflict test changed the real User PATH'
+            $script:evidence.Add([pscustomobject]@{ conflict=$Label; denied=$true; configurationUnchanged=$true; hooksUnchanged=$true; stateUnchanged=$true; backupUnchanged=$true; userPathUnchanged=$true })
+        }
+        [IO.File]::WriteAllBytes($configPath, $encoding.GetBytes($rotatedText + "`r`n# user's later change`r`n"))
+        & $assertRefused 'configuration'
+        [IO.File]::WriteAllBytes($configPath, $rotatedBytes)
+        [IO.File]::WriteAllBytes($hooksPath, [byte[]]($installedHookBytes + $encoding.GetBytes("`r`n")))
+        & $assertRefused 'hooks'
+        [IO.File]::WriteAllBytes($hooksPath, $installedHookBytes)
+        $state = $encoding.GetString($installedStateBytes) | ConvertFrom-Json
+        $state.path_updated = $true
+        $state.installed_user_path = 'SAFEDELETE_TEST_NONMATCH_' + [guid]::NewGuid().ToString('N')
+        Write-SafeDeleteJson $statePath $state
+        & $assertRefused 'User PATH'
+        [IO.File]::WriteAllBytes($statePath, $installedStateBytes)
+        $uninstalled = Invoke-Process -Program $ShellPath -Arguments $uninstallArgs -WorkingDirectory $root
+        Assert-True ($uninstalled.exitCode -eq 0) "Uninstall rejected only the Desktop pipe rotation (exit $($uninstalled.exitCode)); see process evidence"
+        Assert-True ([Convert]::ToBase64String([IO.File]::ReadAllBytes($configPath)) -eq [Convert]::ToBase64String($originalBytes)) 'Pipe rotation uninstall did not restore original config bytes'
+        Assert-True ([Convert]::ToBase64String([IO.File]::ReadAllBytes($hooksPath)) -eq [Convert]::ToBase64String($originalHookBytes)) 'Pipe rotation uninstall did not restore original hooks bytes'
+        Assert-True (-not (Test-Path -LiteralPath $installDir)) 'Pipe rotation uninstall left installed program files behind'
+        Assert-True ([string]::Equals([Environment]::GetEnvironmentVariable('Path','User'), $userPathBefore, [StringComparison]::Ordinal)) 'Isolated pipe uninstall test changed the real User PATH'
+        $script:evidence.Add([pscustomobject]@{ denied_conflicts=3; automatic_pipe_rotation_uninstall=$true; originalConfigurationRestoredByteForByte=$true; originalHooksRestoredByteForByte=$true; installationRemoved=$true; realUserPathUnchanged=$true })
     }
 }
 

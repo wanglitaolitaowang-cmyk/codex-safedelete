@@ -114,6 +114,10 @@ def main():
     for name in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"):
         env[name] = "http://127.0.0.1:1"
     env["NO_PROXY"] = env["no_proxy"] = "127.0.0.1,localhost"
+    # Windows treats environment names case-insensitively. Duplicate proxy
+    # casing in this test otherwise breaks .NET ProcessStartInfo in PowerShell.
+    if os.name == "nt":
+        env = {name.upper(): value for name, value in env.items()}
     FixtureModel.requests = []
     FixtureModel.fixture = fixture
     server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), FixtureModel)

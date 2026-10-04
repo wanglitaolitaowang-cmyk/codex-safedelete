@@ -5,14 +5,15 @@ Codex CLI **0.160.0**, Git 2.55.0. Production code uses PowerShell and .NET only
 
 | Suite | Runtime | Result |
 | --- | --- | --- |
-| Acceptance tests (including actual npm execution) | Windows PowerShell 5.1.22621.5909 | 30/30 PASS, 0 NOT RUN |
-| Acceptance tests (including actual npm execution) | PowerShell 7.6.5 | 30/30 PASS, 0 NOT RUN |
+| Acceptance tests (including actual npm execution and uninstall compatibility) | Windows PowerShell 5.1.22621.5909 | 33/33 PASS, 0 NOT RUN |
+| Acceptance tests (including actual npm execution and uninstall compatibility) | PowerShell 7.6.5 | 33/33 PASS, 0 NOT RUN |
+| Independent uninstall guard review | PowerShell 5.1 / 7 | 21/21 PASS each |
 | Storage fault and tamper tests | Windows PowerShell 5.1.22621.5909 | 8/8 PASS |
 | Storage fault and tamper tests | PowerShell 7.6.5 | 8/8 PASS |
 | Real Codex install → hooks → safe delete → undo → uninstall | Codex 0.160.0 / Windows PowerShell | PASS |
 | Desktop deletion and recovery | Windows Codex Desktop 26.930.3930.0 | PASS: file and recursive directory deletion intercepted; both restored with original bytes |
 | Desktop danger commands | Windows Codex Desktop 26.930.3930.0 | 5/5 DENY; fixture bytes unchanged |
-| Desktop E2E release gate | Windows Codex Desktop 26.930.3930.0 | FAIL: initial uninstall refused changed configuration; cleanup PASS after reviewed merge |
+| Desktop E2E release gate | Windows Codex Desktop 26.930.3930.0 | Retest pending after the narrow uninstall fix; previous default-uninstall run FAIL |
 
 The Desktop review used the real default user installation. `install.ps1`
 exited 0, registered an enabled/trusted Hook and passed its runtime check.
@@ -43,9 +44,26 @@ After a reviewed merge of that one Desktop-generated value, the unchanged
 uninstaller exited 0. Original `config.toml` bytes and User PATH matched
 their pre-install checksums; the newly created `hooks.json` and installation
 directory were absent. Project recovery history was retained.
-The complete Desktop E2E is FAIL because default uninstall required this
-manual merge. This is an uninstall limitation; Desktop deletion Hook and
-recovery were verified. Production scripts remain unchanged.
+That initial Desktop E2E was FAIL because default uninstall required a manual
+merge. The authorized fix changes only `uninstall.ps1` and `src/InstallState.ps1`:
+a unique single-line MCP pipe value may rotate only between valid
+`codex-computer-use` GUID named pipes, and restoring just that value in memory
+must reproduce the exact installed SHA-256. Ambiguous TOML, other bytes,
+Hook/PATH changes and corrupt backups remain rejected. Deletion, storage,
+restore and Hook code are unchanged. A new real Desktop run remains pending.
+
+The new regression runs passed all 33 cases in both PowerShell versions. Three
+additional cases cover valid rotations with UTF-8/BOM/line endings, 16 refused
+changes with no writes, and actual isolated install/uninstall while configuration,
+Hook and PATH conflicts remain protected. Both complete JSONL files were fully
+parsed: 66 PASS, zero parse errors, FAIL or NOT RUN; all nine recorded source
+hashes still match the tested files.
+
+The updated real CLI integration run also passed. Two earlier supplemental CLI
+attempts failed before registration because the test supplied duplicate-cased
+Windows proxy environment names. Normalizing only the test environment fixed
+this; the production Hook registration implementation did not change. Failed
+attempts remain in ignored local evidence and are not counted as PASS.
 
 The isolated CLI integration test uses a fixed model fixture served only on loopback. No
 remote model, authentication or user files are used. Non-local proxy traffic is
@@ -74,7 +92,7 @@ Sources: [npm metadata](https://registry.npmjs.org/npm/10.9.4),
 
 An additional run without npm reported **27 PASS, 0 FAIL, 1 NOT RUN** (installation
 checks omitted in that audit), confirming missing commands cannot be counted as
-successful execution. Final JSONL results were fully parsed: 60 acceptance
+successful execution. The original MVP JSONL results were fully parsed: 60 acceptance
 records, 60 PASS, no parse errors and no NOT RUN entries. No real user Codex
 configuration or user PATH was changed by these isolated tests.
 
@@ -104,6 +122,11 @@ Final local evidence (ignored by Git; full output stays on this machine):
 - `tests/.work/20261004-132216-5-ecd32dea/results.jsonl` and `summary.json`
 - `tests/.work/20261004-132217-7-6e5e2c81/results.jsonl` and `summary.json`
 - `tests/.work/20261004-132041-7-0de54104/summary.json` (missing-npm audit)
+- `tests/.work/20261004-142055-5-6bf95239/results.jsonl` and `summary.json` (33 cases)
+- `tests/.work/20261004-142052-7-a609e6cb/results.jsonl` and `summary.json` (33 cases)
+- `tests/.work/codex-hook-20261004-142803-b14e5d6a/results.json` (updated CLI PASS)
+- `tests/.work/codex-hook-20261004-142327-9c3e394a/results.json` and `codex-hook-20261004-142621-d2ac80ff/results.json` (failed test-environment attempts)
+- `tests/.work/guard-review-d79a039e504b4cb086dc6865c6109918/report-5.json` and `report-7.json`
 - `work/desktop-final/restart.json`
 - `work/desktop-final/file-delete.json` and `file-undo.json`
 - `work/desktop-final/folder-delete.json` and `folder-undo.json`
