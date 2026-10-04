@@ -3,9 +3,96 @@
 Tested locally on **2026-10-04 (UTC+08:00)**. Windows build 22631 (23H2),
 Codex CLI **0.160.0**, Git 2.55.0. Production code uses PowerShell and .NET only.
 
-## Windows MVP environment and installation repairs — 2026-10-04
+## Shared installation and MSIX visibility repair — 2026-10-04
 
-The final MVP verification passed **483/483 checks**, with zero skips. This
+The Explorer failure was real: Codex Desktop's MSIX filesystem view redirected
+the old AppData installation into its package cache, while an ordinary Windows
+process saw the Hook registration without its installation state. The default
+is now `%USERPROFILE%\.codex-safedelete-app`. Verified legacy defaults migrate
+with original backups, recovery history and pause state preserved; uncertain
+ownership or configuration changes are refused before migration writes.
+
+Fresh installation and migration save `backup/installed-config.toml` as a
+separate SHA-256-checked comparison reference. Only an otherwise byte-identical
+Desktop native pipe value change is accepted. The original configuration backup
+remains the uninstall baseline. Damaged references and unrelated changes stay
+refused. Retained cached Hooks have their protection flags checked and
+synchronized with the new runtime until Codex restarts. SDK discovery also
+finds the native SDK in a known Codex package cache behind a PATH npm shim.
+
+Final affected-suite results on the same frozen source were **212/212**, with
+zero skips, across Windows PowerShell **5.1.22621.5909** and PowerShell **7.6.5**:
+
+| Suite | Per runtime | Final result |
+|---|---:|---|
+| Installation location, legacy migration and configuration reference | 28 | 56/56 |
+| Actual SDK acceptance | 43 | 86/86 |
+| Protection and uninstall ownership | 27 | 54/54 |
+| Installation preflight | 5 | 10/10 |
+| Hook self-check | 3 | 6/6 |
+
+Installation-location tests cover missing LOCALAPPDATA, custom CodexHome,
+logical/package-cache defaults, foreign Hook preservation, failed migration
+rollback, cached runtime switches, damaged markers and references, original
+configurations present/absent, and later Desktop pipe changes. They use isolated
+registration fixtures; the acceptance suite supplies actual SDK integration.
+
+The initial paired run passed 210/212. Its cached-runtime status checks reported
+UNKNOWN after one process-start access denial and one verification timeout.
+Both complete installation-location suites then passed separately, 28/28 each,
+without changing production code. Initial failures remain recorded, and no
+security policy was changed. Queries over the incident's full 20-minute window
+in five enabled Defender/AppLocker/CodeIntegrity channels found no events; the
+cause of the launch refusal is unknown. All final selected runs preserve the
+global configuration and User PATH, keep the 24 recorded source hashes intact,
+and restore protection ON.
+
+The actual source `Install SafeDelete.cmd` returned exit 0 twice in the inherited
+Desktop view: migration completed, 11 installed program files matched their
+sources, and repeat installation left state, configuration and User PATH
+unchanged. An ordinary WMI-created Windows CMD then found the shared state with
+exactly the same bytes while the old logical AppData state was absent. Running
+the actual installer in that ordinary context produced its success message
+with empty stderr. A subsequent WMI call-wrapper run was refused when starting
+PowerShell (installer exit 5); this separate retained failure is not counted as
+successful external installation. No Explorer mouse double-click or full GUI
+exit/restart was performed in this repair batch.
+
+The local legacy configuration had two changes after its recorded installation:
+a Desktop pipe value and an added project trust table. A historical installed
+configuration matched the recorded installed SHA-256 exactly. Full TOML and byte
+comparison proved that retaining the exact project trust block left only the
+pipe difference. A backed-up local metadata repair used that evidence without
+writing the live configuration. Actual migration changed only the owned Hook
+command and its trusted hash; project trust and every other setting survived.
+This local recovery does not relax the product's refusal of unknown changes.
+
+The installed `Pause SafeDelete.cmd` and `Resume SafeDelete.cmd` entries both
+returned exit 0 and synchronized the shared/cached flags OFF then ON. A separate
+installed-command smoke run moved and restored both targets, with exact binary
+bytes and an empty directory recovered, no configuration/User PATH change, and
+final protection ON.
+
+Local evidence is ignored by Git:
+
+- Initial paired affected run: `tests/.work/msix-boundary-20261004-224902-4adaa609/{verification,audit}.json`
+- Final PS5 installation-location run: `tests/.work/msix-boundary-20261004-225836-1f359f46/{verification,audit}.json`
+- Final PS7 installation-location run: `tests/.work/msix-boundary-20261004-230148-b646eac6/{verification,audit}.json`
+- Actual CMD migration/repeat and settings preservation: `work/external-install-20261004-224738-567/{verification,preservation}.json`
+- Ordinary Windows visibility: `work/ordinary-shared-visibility.json`
+- Local recovery proof and original private files: `work/legacy-reference-repair-20261004-224426-698567/`
+- Ordinary process launch logs, including the failed follow-up: `work/ordinary-install-cmd*`, `work/ordinary-repeat*`
+- Actual pause/resume entries: `work/shared-switch-cmd-20261004-230601-614/verification.json`
+- Installed delete/undo smoke: `tests/.work/installed-mvp-smoke-20261004-230627/verification.json`
+
+These results establish the tested Windows code boundary. Windows 7/8 and
+pre-1809 Windows 10 remain refused; Linux/macOS remain unimplemented. Earlier
+GUI results below are historical. This batch does not certify all Windows
+security configurations or establish universal release compatibility.
+
+## Earlier Windows MVP suite verification — 2026-10-04
+
+The earlier MVP verification passed **483/483 checks**, with zero skips. This
 counts the 20 PowerShell suites below plus three cross-runtime checks and two
 real-console code-page checks. Windows build 22631, non-administrator access,
 Windows PowerShell **5.1.22621.5909**, PowerShell **7.6.5** and Codex CLI
@@ -62,14 +149,18 @@ code-page tests passed 2/2 under 936 and 65001; Chinese, spaces, apostrophes and
 emoji names retained exact binary content. Isolated installations were removed.
 
 The local installed program was backed up and repaired after verification.
-Eleven source-controlled installed files matched their source hashes. The actual
-`Install SafeDelete.cmd` invocation returned exit 0 and its success marker, with
-no error lines. An installed-command smoke check moved and restored two targets,
-including binary data and an empty directory. There is exactly one registered
-SafeDelete Hook. Protection is **ON**; Codex configuration/hooks and User PATH
-remained unchanged throughout these verified operations.
+Eleven source-controlled installed files matched their source hashes. The
+`Install SafeDelete.cmd` invocation returned exit 0 in a process that inherited
+Codex Desktop's filesystem redirection. A later real Explorer double-click
+failed because that process could not see the AppData installation state.
+Therefore, the earlier launcher check did **not** establish Explorer installation
+compatibility. Its installed-command smoke check moved and restored binary data
+and an empty directory in the inherited view. Exactly one SafeDelete Hook was
+registered, protection was ON, and configuration/hooks and User PATH remained
+unchanged during those checks.
 
-These results establish the tested Windows MVP boundary. Windows 7/8 and
+These suite results cover the tested Windows MVP code boundary; the later
+Explorer failure exposed a gap in the installation environment checks. Windows 7/8 and
 pre-1809 Windows 10 are refused; Linux/macOS are not implemented. Eight runtime
 cases per suite simulate version/platform boundaries rather than running those
 systems. Filesystem suites include two native directory queries (ordinary and

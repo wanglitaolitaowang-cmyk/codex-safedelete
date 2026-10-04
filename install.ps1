@@ -14,9 +14,9 @@ Assert-SafeDeleteSupportedInstallRuntime
 
 if (-not $CodexHome) { $CodexHome = $env:CODEX_HOME }
 if (-not $CodexHome) { $CodexHome = Join-Path $env:USERPROFILE '.codex' }
-if (-not $InstallDir) { $InstallDir = Join-Path $env:LOCALAPPDATA 'CodexSafeDelete' }
+$usingDefaultInstallDir = -not $InstallDir
 $CodexHome = [IO.Path]::GetFullPath($CodexHome)
-$InstallDir = [IO.Path]::GetFullPath($InstallDir).TrimEnd([char[]]'\/')
+$InstallDir = Resolve-SafeDeleteInstallDirectory -InstallDir $InstallDir -CodexHome $CodexHome
 $project = Get-SafeDeleteRoot -WorkingDirectory ((Get-Location).Path)
 $project = Get-SDProjectRoot -ProjectRoot $project
 Assert-SafeDeleteInstallPath $InstallDir
@@ -51,6 +51,11 @@ try {
     }
     if ((Test-Path -LiteralPath $InstallDir) -and @(Get-ChildItem -LiteralPath $InstallDir -Force).Count -gt 0) { throw 'InstallDir must be empty; existing files will not be overwritten.' }
     if ($InstallDir -eq $PSScriptRoot -or $PSScriptRoot.StartsWith($InstallDir + '\', [StringComparison]::OrdinalIgnoreCase)) { throw 'InstallDir must not contain the source checkout.' }
+    if ($usingDefaultInstallDir -and (Invoke-SafeDeleteLegacyMigration -SourceRoot $PSScriptRoot -InstallDir $InstallDir -CodexHome $CodexHome -ProjectRoot $project -NoPathUpdate:$NoPathUpdate)) {
+        Write-Output ('Codex SafeDelete migrated to ' + $InstallDir + '. The original installation and recovery backups were preserved.')
+        Write-Output 'Restart Codex and open a new terminal. In Codex /hooks, confirm SafeDelete is enabled and trusted.'
+        exit 0
+    }
     $shell = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
     $hookScript = Join-Path $InstallDir 'hooks\pre-tool-use.ps1'
     $expectedHookCommand = "& '" + $shell.Replace("'", "''") + "' -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File '" + $hookScript.Replace("'", "''") + "'"
@@ -159,6 +164,13 @@ try {
             $env:Path = $InstallDir + ';' + $env:Path
         }
         foreach ($snapshot in $state.snapshots) { $snapshot.installed_hash = Get-SafeDeleteFileHash $snapshot.path }
+        $installedConfig = @($state.snapshots | Where-Object { $_.name -ceq 'config.toml' })[0]
+        $installedConfigBytes = [IO.File]::ReadAllBytes($installedConfig.path)
+        if ((Get-SafeDeleteBytesHash $installedConfigBytes) -cne $installedConfig.installed_hash) { throw 'Codex configuration changed while preparing its comparison reference.' }
+        $referencePath = Join-Path $backupDirectory 'installed-config.toml'
+        Write-SafeDeleteBytes $referencePath $installedConfigBytes
+        if ((Get-SafeDeleteFileHash $referencePath) -cne $installedConfig.installed_hash) { throw 'Installed-configuration reference checksum mismatch.' }
+        $installedConfig | Add-Member NoteProperty installed_reference_hash $installedConfig.installed_hash
         $state.phase = 'complete'
         Write-SafeDeleteJson $statePath $state
         Write-Output 'Codex SafeDelete installed.'

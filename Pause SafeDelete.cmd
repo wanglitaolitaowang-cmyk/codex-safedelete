@@ -1,5 +1,6 @@
 @echo off
 setlocal EnableExtensions DisableDelayedExpansion
+if exist "%USERPROFILE%\.codex-safedelete-app\safedelete.cmd" goto shared_install
 where safedelete >nul 2>nul
 if errorlevel 1 goto local_install
 call safedelete off
@@ -8,6 +9,10 @@ goto result
 :local_install
 if not exist "%LOCALAPPDATA%\CodexSafeDelete\safedelete.cmd" goto missing
 call "%LOCALAPPDATA%\CodexSafeDelete\safedelete.cmd" off
+set "safedelete_exit=%errorlevel%"
+goto result
+:shared_install
+call "%USERPROFILE%\.codex-safedelete-app\safedelete.cmd" off
 set "safedelete_exit=%errorlevel%"
 :result
 if not "%safedelete_exit%"=="0" goto failed

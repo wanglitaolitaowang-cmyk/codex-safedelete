@@ -197,7 +197,30 @@ function Select-SafeDeleteHookRegistration {
     }
     if ($byKey.Count -ne 1) {
         $keys = @($byKey.Keys) -join '; '
-        throw "Expected exactly one SafeDelete PreToolUse hook; Codex discovered $($byKey.Count) distinct registration(s); cwd=$WorkingDirectory; source=$HookPath; keys=$keys."
+        $diagnostics = ''
+        if ($byKey.Count -eq 0) {
+            $warnings = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::Ordinal)
+            $previews = New-Object 'System.Collections.Generic.List[string]'
+            foreach ($entry in $entries) {
+                $property = $entry.PSObject.Properties['warnings']
+                if ($null -eq $property) { continue }
+                foreach ($warning in @($property.Value)) {
+                    if ($warning -isnot [string] -or [string]::IsNullOrWhiteSpace($warning) -or -not $warnings.Add($warning)) { continue }
+                    if ($previews.Count -ge 3) { continue }
+                    $preview = $warning.Replace("`r", ' ').Replace("`n", ' ').Trim()
+                    if ($preview.Length -gt 512) {
+                        $length = 512
+                        if ([char]::IsHighSurrogate($preview[$length - 1])) { $length-- }
+                        $preview = $preview.Substring(0, $length) + ' [preview shortened]'
+                    }
+                    $previews.Add($preview)
+                }
+            }
+            if ($warnings.Count -gt 0) {
+                $diagnostics = ' SDK warnings (' + $previews.Count + ' of ' + $warnings.Count + ' shown): ' + ($previews -join ' | ') + '. Full diagnostics: Codex hooks/list for cwd=' + $WorkingDirectory + '.'
+            }
+        }
+        throw ("Expected exactly one SafeDelete PreToolUse hook; Codex discovered $($byKey.Count) distinct registration(s); cwd=$WorkingDirectory; source=$HookPath; keys=$keys." + $diagnostics)
     }
     foreach ($hook in $byKey.Values) {
         if (-not $hook.enabled) { throw "The SafeDelete hook is disabled; cwd=$WorkingDirectory; source=$HookPath; key=$($hook.key)." }

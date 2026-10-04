@@ -67,6 +67,8 @@ attention; the command returns an error instead of claiming protection.
 
 Double-click **`Uninstall SafeDelete.cmd`**.
 
+Reopen Codex and your terminal after uninstalling to clear the running Hook and PATH.
+
 Pause temporarily disables protection while SafeDelete stays installed.
 Uninstall removes SafeDelete and restores the original Codex configuration
 and PATH. Both preserve previously saved project trash and history.
@@ -121,10 +123,19 @@ installation, then double-click `Install SafeDelete.cmd` to retry. Cleanup keeps
 configuration and PATH changes made after rollback. If rollback is incomplete,
 inspect the error and preserved backups before retrying.
 
-Repeating installation verifies the existing program; it does not upgrade its
+The default program folder is `%USERPROFILE%\.codex-safedelete-app`, shared by
+Explorer and Codex. MSIX desktop apps can redirect the old AppData location into
+their package cache, leaving Explorer with a Hook registration but no visible
+program. Installation backs up and migrates a verified legacy default install,
+preserving original configuration backups, pause state and project recovery
+records. Pause, resume and status also verify a retained legacy cached Hook so
+its switch stays consistent until Codex restarts. Ambiguous installations, conflicts and missing valid state are preserved
+with a diagnostic; registration is not removed blindly.
+
+Repeating installation in the shared folder verifies the existing program; it does not upgrade its
 files. If this checkout's program files differ, installation stops without
 changing the existing installation. Use `Uninstall SafeDelete.cmd` from the
-original version, then install the new version. Project trash and history are
+original version, reopen Codex and your terminal, then install the new version. Project trash and history are
 preserved during uninstall.
 
 For the same Windows user, installation and uninstall cannot run concurrently

@@ -74,8 +74,8 @@ function New-TestHook {
 }
 
 function New-TestEntry {
-    param([object[]]$Hooks, [string]$Cwd = $project, [object[]]$Errors = @())
-    return [pscustomobject]@{ cwd=$Cwd; hooks=@($Hooks); warnings=@(); errors=@($Errors) }
+    param([object[]]$Hooks, [string]$Cwd = $project, [object[]]$Errors = @(), [object[]]$Warnings = @())
+    return [pscustomobject]@{ cwd=$Cwd; hooks=@($Hooks); warnings=@($Warnings); errors=@($Errors) }
 }
 
 function New-TestListing {
@@ -124,6 +124,51 @@ Test-Case 'One real registration succeeds without configuration writes' {
     $registration = Get-TestRegistration
     Assert-True ($registration.Key -ceq $key -and $registration.CurrentHash -ceq $hash -and $registration.Enabled) 'Registration identity changed.'
     Assert-True ($script:rpcWrites.Count -eq 0 -and $script:starts -eq $script:stops) 'Read-only registration mutated state or leaked a server.'
+}
+
+Test-Case 'Zero matches report the same cwd SDK warning and complete diagnostic source' {
+    $warning = 'hooks.json: unknown field fixture_metadata; expected description or hooks'
+    Set-MockListing ([pscustomobject]@{ data=@((New-TestEntry -Hooks @() -Warnings @($warning))) })
+    $message = Assert-Rejected -NoTrust
+    Assert-True ($message.Contains($warning) -and $message.Contains('Full diagnostics: Codex hooks/list') -and
+        $message.Contains('cwd=' + $project) -and $message.Contains('source=' + $hookPath)) 'SDK warning or its diagnostic source was lost.'
+}
+
+Test-Case 'Zero matches ignore other cwd warnings and non-string warning values' {
+    $localWarning = 'Local configuration warning'
+    $foreignWarning = 'Foreign project warning must stay excluded'
+    $entry = New-TestEntry -Hooks @() -Warnings @($null,17,[pscustomobject]@{text='Invalid warning object'},' ', $localWarning)
+    $foreign = New-TestEntry -Hooks @() -Cwd $foreignProject -Warnings @($foreignWarning)
+    Set-MockListing ([pscustomobject]@{ data=@($entry,$foreign) })
+    $message = Assert-Rejected -NoTrust
+    Assert-True ($message.Contains($localWarning) -and -not $message.Contains($foreignWarning) -and
+        -not $message.Contains('Invalid warning object') -and $message.Contains('1 of 1 shown')) 'An unrelated or invalid warning polluted the diagnostic.'
+}
+
+Test-Case 'Zero-match diagnostics bound warning previews and retain the full source' {
+    $warnings = @(1..5 | ForEach-Object { 'Warning ' + $_ + ': ' + ('x' * 10000) })
+    Set-MockListing ([pscustomobject]@{ data=@((New-TestEntry -Hooks @() -Warnings $warnings)) })
+    $message = Assert-Rejected -NoTrust
+    Assert-True ($message.Length -lt 4096 -and $message.Contains('3 of 5 shown') -and
+        $message.Contains('[preview shortened]') -and -not $message.Contains('Warning 4:') -and
+        $message.Contains('Full diagnostics: Codex hooks/list for cwd=' + $project)) 'Warning previews were unbounded or omitted their complete source.'
+    Assert-True ($warnings[0].Length -gt 10000) 'The SDK warning source was modified while making a preview.'
+}
+
+Test-Case 'Warnings do not reject a unique valid registration' {
+    $entry = New-TestEntry -Hooks @((New-TestHook)) -Warnings @('Another hook source has an unsupported field',23)
+    Set-MockListing ([pscustomobject]@{ data=@($entry) })
+    $registration = Get-TestRegistration
+    Assert-True ($registration.Key -ceq $key -and $script:rpcWrites.Count -eq 0 -and $script:starts -eq $script:stops) 'A warning changed a valid read-only registration.'
+}
+
+Test-Case 'Warnings preserve trust and reload verification for a unique registration' {
+    $before = [pscustomobject]@{ data=@((New-TestEntry -Hooks @((New-TestHook @{trustStatus='untrusted'})) -Warnings @('Initial unrelated warning'))) }
+    $after = [pscustomobject]@{ data=@((New-TestEntry -Hooks @((New-TestHook)) -Warnings @('Reload unrelated warning'))) }
+    Set-MockListing $before $after
+    $registration = Get-TestRegistration -Trust
+    Assert-True ($registration.Key -ceq $key -and $script:rpcWrites.Count -eq 1 -and
+        $script:listingIndex -eq 2 -and $script:starts -eq $script:stops) 'Warnings changed the required trust write or reload verification.'
 }
 
 Test-Case 'Identical returned rows collapse to one registration' {
