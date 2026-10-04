@@ -3,6 +3,59 @@
 Tested locally on **2026-10-04 (UTC+08:00)**. Windows build 22631 (23H2),
 Codex CLI **0.160.0**, Git 2.55.0. Production code uses PowerShell and .NET only.
 
+## Double-click installation
+
+The two new CMD files only launch the existing PowerShell scripts and display
+their exit result. They always use Windows PowerShell 5.1, including when
+called from a PowerShell 7 console. Direct PowerShell 7 installation was
+tested separately. No deletion, storage, recovery, Hook or uninstall logic
+changed during this installation-experience update.
+
+| Actual check | Result |
+| --- | --- |
+| Extracted source paths containing spaces, Chinese characters and `!` | PASS |
+| Install/uninstall CMD called from Windows PowerShell 5.1 and PowerShell 7 | PASS |
+| Direct installer under PS5.1 and PS7 with Codex absent from PATH | PASS: Desktop's local binary found; original process PATH recorded |
+| Explorer mouse double-click of `Install SafeDelete.cmd` | PASS: real default user installation and retained success window |
+| Newly installed Hook in the running Codex Desktop | PASS: actual `Remove-Item` rewritten; exact fixture bytes preserved in trash |
+| `safedelete undo` through the installed User PATH | PASS: original location and exact bytes restored |
+| Explorer mouse double-click of `Uninstall SafeDelete.cmd` | PASS: real default uninstallation and retained success window |
+| Original Codex configuration and User PATH after uninstall | PASS: byte-exact/checksum match; installation directory absent |
+| Missing scripts and configuration conflicts | PASS: nonzero exit, failure message, no false success; conflicts preserved |
+| Saved execution policies | PASS: unchanged |
+
+The Explorer checks used actual mouse down/up pairs on the observed CMD list
+items, within the Windows double-click interval. They were not replaced with
+`cmd /c`, ShellExecute or UIAutomation Invoke. Success text was read from the
+new terminal windows. Codex Desktop was never killed or forcibly restarted.
+The existing Desktop session loaded the installed Hook for the actual deletion;
+the user-facing instruction still says to reopen Codex and the terminal once.
+
+The first real Explorer attempt **failed** because Explorer lacked the Codex
+agent's injected PATH. Its failure window stayed open. The minimum fix is
+only in `install.ps1`: if Codex is missing from PATH, locate a regular local
+Desktop `codex.exe` in its existing binary folder, reject linked paths, and
+temporarily add its directory to the installer process PATH. User PATH still
+receives only SafeDelete. Both PowerShell versions and real Explorer were
+tested after the fix.
+
+Two rapid repeated-install attempts also hit the existing local app-server's
+20-second initialization timeout. Both reported failure and rolled back;
+independent repeats passed. These failed attempts remain in local evidence
+and are not counted as PASS. Hook startup or protection code was not changed.
+
+Full evidence is local and ignored by Git in `work/launcher-final/`:
+`final-automated-report.json`, `fallback-report.json`, mouse double-click
+reports, installation/uninstallation window checks and Desktop delete/undo
+reports. Original configuration snapshots and PATH values are private local
+evidence only. Earlier failed-attempt logs are preserved there as well.
+
+After the installer lookup change, the complete existing acceptance suites
+were run again on the delivered scripts: PS5.1 **33/33 PASS** and PS7
+**33/33 PASS**, including actual npm execution and uninstall conflicts.
+
+## Existing protection and installation suites
+
 | Suite | Runtime | Result |
 | --- | --- | --- |
 | Acceptance tests (including actual npm execution and uninstall compatibility) | Windows PowerShell 5.1.22621.5909 | 33/33 PASS, 0 NOT RUN |
@@ -121,6 +174,8 @@ Final local evidence (ignored by Git; full output stays on this machine):
 - `tests/.work/20261004-132041-7-0de54104/summary.json` (missing-npm audit)
 - `tests/.work/20261004-142055-5-6bf95239/results.jsonl` and `summary.json` (33 cases)
 - `tests/.work/20261004-142052-7-a609e6cb/results.jsonl` and `summary.json` (33 cases)
+- `tests/.work/20261004-151300-5-fb1724a6/results.jsonl` and `summary.json` (final launcher-update regression, 33 cases)
+- `tests/.work/20261004-151302-7-bbe3499d/results.jsonl` and `summary.json` (final launcher-update regression, 33 cases)
 - `tests/.work/codex-hook-20261004-142803-b14e5d6a/results.json` (updated CLI PASS)
 - `tests/.work/codex-hook-20261004-142327-9c3e394a/results.json` and `codex-hook-20261004-142621-d2ac80ff/results.json` (failed test-environment attempts)
 - `tests/.work/guard-review-d79a039e504b4cb086dc6865c6109918/report-5.json` and `report-7.json`

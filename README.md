@@ -4,11 +4,13 @@ Stop AI coding agents from permanently deleting your files.
 
 Dangerous delete commands are intercepted and made recoverable.
 
-```powershell
-.\install.ps1
-```
+### Install
 
-Accidental deletion?
+Double-click **`Install SafeDelete.cmd`** in the extracted project folder.
+
+That's it. Reopen Codex and your terminal once, then use Codex normally.
+
+### Accidentally deleted something?
 
 ```powershell
 safedelete undo
@@ -34,7 +36,19 @@ MIT licensed.
 | Codex CLI 0.160.0 with a local `codex.exe` | Real Hook → trash → undo → uninstall verified |
 | Codex Desktop 26.930.3930.0 | Real install, full restart, deletion interception, undo and default uninstall verified |
 
-Download the project and run the install command above in its folder.
+The launchers use Windows PowerShell 5.1, require no administrator access,
+and keep the result window open. Execution-policy bypass applies only to
+that process; your saved execution policy is unchanged. The existing installer
+checks Hook registration, trust and execution before reporting success.
+If `codex.exe` is absent from PATH, it checks Codex Desktop's local binary
+folder automatically. If local Codex initialization times out, installation
+rolls back; read the error and double-click the installer again.
+
+Advanced users can install from PowerShell in the extracted project folder:
+
+```powershell
+.\install.ps1
+```
 
 If Windows blocks a downloaded script, after reviewing it run
 `powershell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1`.
@@ -81,14 +95,15 @@ Do not use interactive shells or bypass the hook for deletion. The supplied
 without the skill. Files already permanently deleted before installation cannot
 be recovered. Use an OS backup for broader protection.
 
-Uninstall from this downloaded folder:
+To uninstall, double-click **`Uninstall SafeDelete.cmd`** in the same folder.
+Your recoverable trash is preserved. Or use PowerShell:
 
 ```powershell
 .\uninstall.ps1
 ```
 
-Run installation and uninstallation in a separate PowerShell terminal. The Hook
-deliberately refuses opaque scripts invoked by the agent.
+Use the launchers or a separate PowerShell terminal for installation and
+uninstallation. The Hook deliberately refuses opaque scripts invoked by the agent.
 
 The installer preserves existing hooks and backs up the original Codex
 configuration byte for byte. Uninstall restores it and removes its PATH entry;

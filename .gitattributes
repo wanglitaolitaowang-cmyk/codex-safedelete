@@ -1,0 +1,2 @@
+# Preserve the Windows launchers' CRLF bytes in downloads and checkouts.
+*.cmd -text whitespace=blank-at-eol,blank-at-eof,space-before-tab,cr-at-eol

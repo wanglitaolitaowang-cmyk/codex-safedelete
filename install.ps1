@@ -19,6 +19,22 @@ $project = Get-SafeDeleteRoot -WorkingDirectory ((Get-Location).Path)
 Assert-SafeDeleteInstallPath $InstallDir
 Assert-SafeDeleteInstallPath $CodexHome
 if ($CodexHome -eq $InstallDir -or $CodexHome.StartsWith($InstallDir + '\', [StringComparison]::OrdinalIgnoreCase) -or $InstallDir.StartsWith($CodexHome + '\', [StringComparison]::OrdinalIgnoreCase)) { throw 'InstallDir and CodexHome must be separate directories.' }
+$originalProcessPath = $env:Path
+if (-not (Get-Command codex -ErrorAction SilentlyContinue)) {
+    # Explorer does not inherit the Codex agent's PATH. Find Desktop's local binary.
+    $desktopBin = Join-Path $env:LOCALAPPDATA 'OpenAI\Codex\bin'
+    if ((Test-Path -LiteralPath $desktopBin -PathType Container) -and
+        -not ((Get-Item -LiteralPath $desktopBin).Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+        Assert-SafeDeleteInstallPath $desktopBin
+        $desktopCodex = Get-ChildItem -LiteralPath $desktopBin -Directory |
+            Where-Object { -not ($_.Attributes -band [IO.FileAttributes]::ReparsePoint) } |
+            ForEach-Object { Get-Item -LiteralPath (Join-Path $_.FullName 'codex.exe') -ErrorAction SilentlyContinue } |
+            Where-Object { -not $_.PSIsContainer -and -not ($_.Attributes -band [IO.FileAttributes]::ReparsePoint) } |
+            Where-Object { try { Assert-SafeDeleteInstallPath $_.FullName; $true } catch { $false } } |
+            Sort-Object -Property @{Expression='LastWriteTimeUtc';Descending=$true},FullName | Select-Object -First 1
+        if ($desktopCodex) { $env:Path = $desktopCodex.DirectoryName + ';' + $env:Path }
+    }
+}
 $null = Get-Command codex -ErrorAction Stop
 $statePath = Join-Path $InstallDir 'install-state.json'
 if (Test-Path -LiteralPath $statePath) {
@@ -41,7 +57,7 @@ $state = [pscustomobject]@{
     version = 1; phase = 'installing'; install_dir = $InstallDir; codex_home = $CodexHome
     hook_command = ''; snapshots = @(); files = @(); path_updated = $false
     original_user_path = [Environment]::GetEnvironmentVariable('Path','User')
-    original_process_path = $env:Path; installed_user_path = $null
+    original_process_path = $originalProcessPath; installed_user_path = $null
 }
 foreach ($name in @('config.toml','hooks.json')) {
     $path = Join-Path $CodexHome $name
