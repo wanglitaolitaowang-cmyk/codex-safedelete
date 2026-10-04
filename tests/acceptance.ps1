@@ -31,7 +31,7 @@ function Assert-True([bool]$Condition, [string]$Message) {
 }
 
 function Get-ProgramHashes {
-    foreach ($relative in @('install.ps1', 'uninstall.ps1', 'src\Storage.ps1', 'src\Commands.ps1', 'src\safedelete.ps1', 'src\InstallState.ps1', 'hooks\pre-tool-use.ps1', 'hooks\Trust.ps1', 'tests\acceptance.ps1')) {
+    foreach ($relative in @('install.ps1', 'uninstall.ps1', 'src\Storage.ps1', 'src\Commands.ps1', 'src\safedelete.ps1', 'src\InstallState.ps1', 'src\Protection.ps1', 'hooks\pre-tool-use.ps1', 'hooks\Trust.ps1', 'tests\acceptance.ps1')) {
         $stream = [IO.File]::OpenRead((Join-Path $SourceRoot $relative))
         $sha = [Security.Cryptography.SHA256]::Create()
         try { [pscustomobject]@{ path = $relative; sha256 = [BitConverter]::ToString($sha.ComputeHash($stream)).Replace('-', '') } }
@@ -364,7 +364,7 @@ Invoke-Case 'ordinary apply_patch source update allowed' {
 
 Invoke-Case 'missing Storage module returns a blocking hook decision' {
     $root = New-Fixture 'missing-storage'
-    foreach ($relative in @('src\safedelete.ps1', 'src\Commands.ps1', 'hooks\pre-tool-use.ps1')) {
+    foreach ($relative in @('src\safedelete.ps1', 'src\Commands.ps1', 'src\Protection.ps1', 'src\InstallState.ps1', 'hooks\pre-tool-use.ps1')) {
         $target = Join-Path $root $relative
         [void][IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($target))
         [IO.File]::Copy((Join-Path $SourceRoot $relative), $target)
@@ -378,6 +378,8 @@ Invoke-Case 'missing CLI entry makes hook exit 2' {
     $root = New-Fixture 'missing-cli'
     [void][IO.Directory]::CreateDirectory((Join-Path $root 'hooks'))
     [IO.File]::Copy((Join-Path $SourceRoot 'hooks\pre-tool-use.ps1'), (Join-Path $root 'hooks\pre-tool-use.ps1'))
+    [void][IO.Directory]::CreateDirectory((Join-Path $root 'src'))
+    foreach ($name in @('Protection.ps1','InstallState.ps1')) { [IO.File]::Copy((Join-Path $SourceRoot ('src\'+$name)), (Join-Path $root ('src\'+$name))) }
     $payload = @{ hook_event_name='PreToolUse'; cwd=$root; tool_name='Bash'; tool_input=@{command='Remove-Item test.txt'} } | ConvertTo-Json -Depth 6 -Compress
     $result = Invoke-Process -Program $ShellPath -Arguments @('-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', (Join-Path $root 'hooks\pre-tool-use.ps1')) -InputText $payload -WorkingDirectory $root
     Assert-True ($result.exitCode -eq 2) "Missing CLI hook failed open (exit $($result.exitCode))"

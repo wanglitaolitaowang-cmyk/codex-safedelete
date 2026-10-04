@@ -4,7 +4,10 @@ description: Use recoverable local deletion and restore files deleted by mistake
 ---
 
 Prefer `safedelete delete <literal-path>` for deleting files or directories.
-Never bypass SafeDelete, disable its hook, or use another method to permanently delete files.
+Never bypass SafeDelete or use another method to permanently delete files.
+Only when the user explicitly requests pausing protection, run `safedelete off`.
+Never pause protection to work around a denied deletion. Use `safedelete on`
+when the user requests resuming, and `safedelete status` to check its real state.
 Do not replace blocked commands with scripts, encoded commands, APIs, or interactive shell input.
 
 When the user says `undo`, `恢复`, `刚才删错了`, or `rollback delete` after a deletion,

@@ -41,17 +41,36 @@ function Assert-SafeDeleteInstallPath {
 }
 
 function Get-SafeDeleteInstallManifest {
-    @('src\Storage.ps1','src\Commands.ps1','src\safedelete.ps1','src\InstallState.ps1',
+    @('src\Storage.ps1','src\Commands.ps1','src\safedelete.ps1','src\InstallState.ps1','src\Protection.ps1',
       'hooks\pre-tool-use.ps1','hooks\Trust.ps1','SKILL.md','README.md','LICENSE','uninstall.ps1','safedelete.cmd')
 }
 
+function Find-SafeDeleteCodex {
+    if (-not (Get-Command codex -ErrorAction SilentlyContinue)) {
+        $desktopBin = Join-Path $env:LOCALAPPDATA 'OpenAI\Codex\bin'
+        if ((Test-Path -LiteralPath $desktopBin -PathType Container) -and
+            -not ((Get-Item -LiteralPath $desktopBin).Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+            Assert-SafeDeleteInstallPath $desktopBin
+            $desktopCodex = Get-ChildItem -LiteralPath $desktopBin -Directory |
+                Where-Object { -not ($_.Attributes -band [IO.FileAttributes]::ReparsePoint) } |
+                ForEach-Object { Get-Item -LiteralPath (Join-Path $_.FullName 'codex.exe') -ErrorAction SilentlyContinue } |
+                Where-Object { -not $_.PSIsContainer -and -not ($_.Attributes -band [IO.FileAttributes]::ReparsePoint) } |
+                Where-Object { try { Assert-SafeDeleteInstallPath $_.FullName; $true } catch { $false } } |
+                Sort-Object -Property @{Expression='LastWriteTimeUtc';Descending=$true},FullName | Select-Object -First 1
+            if ($desktopCodex) { $env:Path = $desktopCodex.DirectoryName + ';' + $env:Path }
+        }
+    }
+    $null = Get-Command codex -ErrorAction Stop
+}
+
 function Test-SafeDeleteHookCommand {
-    param([string]$HookCommand, [string]$ProjectRoot)
+    param([string]$HookCommand, [string]$ProjectRoot,
+        [ValidateSet('deny','bypass')][string]$ExpectedDecision = 'deny')
     $start = New-Object Diagnostics.ProcessStartInfo
     $start.FileName = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
     # Execute the exact configured hook command, without involving a model or files.
-    $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($HookCommand))
-    $start.Arguments = '-NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand ' + $encoded
+    # Match Codex's readable -Command invocation instead of encoding the command.
+    $start.Arguments = '-NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "' + $HookCommand.Replace('"','\"') + '"'
     $start.WorkingDirectory = $ProjectRoot
     $start.UseShellExecute = $false; $start.CreateNoWindow = $true
     $start.RedirectStandardInput = $true; $start.RedirectStandardOutput = $true; $start.RedirectStandardError = $true
@@ -69,8 +88,13 @@ function Test-SafeDeleteHookCommand {
         $process.StandardInput.BaseStream.Flush(); $process.StandardInput.Close()
         if (-not $process.WaitForExit(10000)) { $process.Kill(); throw 'Hook runtime verification timed out.' }
         if ($process.ExitCode -ne 0) { throw ('Hook runtime verification failed. Exit code: ' + $process.ExitCode) }
+        if ([string]::IsNullOrWhiteSpace($output.Result)) { throw 'Hook runtime verification returned no output. Check whether security software blocked the Hook.' }
         $response = $output.Result | ConvertFrom-Json
-        if ($response.hookSpecificOutput.permissionDecision -ne 'deny') { throw 'Hook runtime verification did not deny project-root deletion.' }
+        if ($ExpectedDecision -eq 'bypass') {
+            if ($null -eq $response -or @($response.PSObject.Properties).Count -ne 0) { throw 'Hook runtime verification did not confirm paused protection.' }
+        } elseif ($null -eq $response -or -not $response.PSObject.Properties['hookSpecificOutput'] -or
+            -not $response.hookSpecificOutput -or -not $response.hookSpecificOutput.PSObject.Properties['permissionDecision'] -or
+            $response.hookSpecificOutput.permissionDecision -ne 'deny') { throw 'Hook runtime verification did not deny project-root deletion. Check whether security software blocked the Hook.' }
     } finally { $process.Dispose() }
 }
 

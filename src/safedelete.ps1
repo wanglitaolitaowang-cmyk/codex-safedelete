@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-    [Parameter(Position = 0)][ValidateSet('delete','undo','list','restore','hook','doctor')][string]$Action = 'list',
+    [Parameter(Position = 0)][ValidateSet('delete','undo','list','restore','hook','doctor','off','on','status')][string]$Action = 'list',
     [Parameter(Position = 1, ValueFromRemainingArguments = $true)][string[]]$Paths = @(),
     [string]$Id,
     [string]$ProjectRoot,
@@ -24,6 +24,22 @@ function Write-HookDecision {
 }
 
 try {
+    if ($Action -in @('off','on','status')) {
+        $result = 'UNKNOWN'
+        try {
+            . (Join-Path $PSScriptRoot 'Protection.ps1')
+            if ($Paths.Count -gt 0 -or $Id -or $ProjectRoot -or $Command) { throw ('Usage: safedelete ' + $Action) }
+            $result = Invoke-SafeDeleteProtection -Action $Action -InstallDir (Split-Path -Parent $PSScriptRoot)
+        } catch { [Console]::Error.WriteLine('Codex SafeDelete: ' + $_.Exception.Message) }
+        Write-Output ('SafeDelete: ' + $result)
+        Write-Output ''
+        switch ($result) {
+            'ON' { Write-Output 'Codex delete protection is active.' }
+            'OFF' { Write-Output 'Codex delete protection is currently disabled.' }
+            default { Write-Output 'Configuration requires attention.'; exit 1 }
+        }
+        exit 0
+    }
     . (Join-Path $PSScriptRoot 'Storage.ps1')
     . (Join-Path $PSScriptRoot 'Commands.ps1')
     if ($Action -eq 'hook') {

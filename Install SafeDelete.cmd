@@ -14,8 +14,8 @@ if not "%safedelete_exit%"=="0" goto failed
 echo.
 echo Codex SafeDelete installed successfully.
 echo.
-echo [OK] Codex protection enabled
-echo [OK] Safe delete enabled
+echo [OK] Codex Hook configured
+echo [OK] Safe delete command available
 echo [OK] Undo command available
 echo.
 echo You only need to reopen Codex and your terminal once.

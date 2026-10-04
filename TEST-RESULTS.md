@@ -3,6 +3,98 @@
 Tested locally on **2026-10-04 (UTC+08:00)**. Windows build 22631 (23H2),
 Codex CLI **0.160.0**, Git 2.55.0. Production code uses PowerShell and .NET only.
 
+## Pause and resume protection
+
+The new installation-wide `protection-state.json` switch is read by the Hook
+on every invocation. Switching does not rewrite Codex configuration or PATH.
+Deletion planning, storage, recovery and Hook trust implementations are unchanged.
+
+| Actual check | Result |
+| --- | --- |
+| Strict off/on/status suite, Windows PowerShell 5.1.22621.5909 | 27/27 PASS |
+| Strict off/on/status suite, PowerShell 7.6.5 | 27/27 PASS |
+| Real Codex CLI 0.160.0, installer run from each PowerShell version | PASS: 12 actions and 4 native scenarios per run |
+| Existing acceptance suite on the current scripts | PS5.1 33/33 PASS; PS7 33/33 PASS |
+| Explorer mouse double-click Pause / Resume, including success windows | PASS |
+| Desktop OFF restart and ON restart | PASS: full exit/reopen verified; actual deletion behavior matches each state |
+| Earlier recovery records after pause/resume | PASS: exact trash/history preserved; old and new files restored by two undo calls |
+| Real default uninstall after pause/resume | PASS: double-click; original configuration bytes and User PATH restored; installed files removed |
+
+The final default installation and Desktop checks passed after the operator
+manually allowed 360 warnings. Two earlier Explorer installation attempts failed
+the Hook self-check; a screenshot confirms 360 blocked `hooks/pre-tool-use.ps1`.
+A third attempt timed out while 360 warned about the Windows console host.
+All checked source/install files remained present with matching copied hashes.
+Each failed attempt's configuration/PATH rollback and residual-file cleanup
+were verified before retrying. These failures remain recorded as FAIL.
+
+Only the existing self-check command transport was changed from encoded text
+to a readable PowerShell command; missing or malformed Hook output now produces
+a clear installation error. No antivirus settings or exclusions were changed
+by the tool. Default compatibility with 360 or other antivirus products is
+not proven, and zero false positives are not promised.
+
+The final real Desktop run used package **26.930.3930.0**, the default user
+installation and a project path containing spaces and Chinese characters.
+The operator fully exited and reopened Desktop three times: initial ON,
+paused OFF, and resumed ON. Prior process identities were checked after each
+restart. Actual ON deletes before pause and after resume were intercepted and
+stored with exact original bytes. During OFF, an actual synthetic deletion
+ran normally, created no recovery record, and left all previous trash/history
+bytes unchanged. Pause and Resume preserved Hook configuration, installed files
+and User PATH. Two actual `safedelete undo` calls restored both saved files.
+The real double-click uninstaller restored the original configuration and PATH
+without a manual merge and preserved history.
+
+The old Desktop session did not intercept one synthetic delete before the
+required initial reopen; that check is FAIL, and its fixture was recreated.
+The first Resume mouse attempt also failed to launch its terminal and remained
+OFF; the observed retry launched normally and passed all state/window checks.
+Neither failed attempt is counted as PASS. No user files were selected.
+
+The isolated suites check initial ON, repeated off/on, status from a child
+directory with spaces and Chinese characters, missing or damaged state,
+disabled/untrusted/changed Hooks, preservation of later unrelated configuration,
+and repeated installation while OFF. Existing list/restore/undo work while OFF;
+undo also restores records saved before pause after resuming. Isolated uninstall
+preserves history and restores configuration. These runs use `-NoPathUpdate`;
+default installation and User PATH restoration require the separate Desktop run.
+
+The real CLI tests use only synthetic files and a fixed loopback model fixture.
+OFF executes the original delete without creating a recovery record; ON again
+replaces deletion with recoverable storage. A malformed pause flag is blocked
+by the native Hook, with zero command-execution events. Two undo calls restore
+both pre-pause and post-resume records. All 48 JSONL events were fully parsed,
+with zero parse errors; running-source hashes match the tested scripts.
+
+An initial real CLI run **failed**: the new state-read error used exit 2, which
+the Windows shell wrapper normalized to exit 1, allowing the synthetic deletion.
+An audit also rejected four earlier unit results whose assertions accepted any
+nonzero exit. The minimum fix affects only the new pause-state error branch:
+it returns explicit deny JSON with exit 0. The strict suites and real CLI tests
+above were rerun after this fix and again after the self-check transport change.
+The original deletion rules were not changed. Across the final four PowerShell
+suites, all 120 records passed with zero parse errors; all 40 runtime-source
+hash comparisons matched.
+Official behavior: [PowerShell command wrapping](https://github.com/openai/codex/blob/rust-v0.160.0/codex-rs/core/src/shell.rs#L22)
+and [PreToolUse result handling](https://github.com/openai/codex/blob/rust-v0.160.0/codex-rs/hooks/src/events/pre_tool_use.rs#L193).
+
+Seven earlier CLI attempts remain recorded as FAIL: one argument-contract error,
+three test-helper encoding/initialization failures, the bad-state failure above,
+one documentation snapshot drift, and one assertion mistaking a blocked command's
+echo for execution. The final two CLI runs pass; those failures are not counted
+as successful tests. No user files were selected.
+
+Local evidence is ignored by Git:
+`tests/.work/pause-cli-readable-summary.json`,
+`tests/.work/protection-final-report-plain-command.json`,
+`tests/.work/codex-hook-20261004-161955-3b790113/`,
+`tests/.work/codex-hook-20261004-162040-057fdad1/`, and
+`work/pause-desktop/desktop-final-summary.json` (18 checked PASS records and
+9 matching runtime-source hashes). Private configuration/PATH snapshots stay local.
+
+The sections below record the previously verified baseline releases.
+
 ## Double-click installation
 
 The two new CMD files only launch the existing PowerShell scripts and display

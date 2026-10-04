@@ -26,7 +26,7 @@ if ($state.phase -eq 'complete') {
     if ($state.path_updated -and [Environment]::GetEnvironmentVariable('Path','User') -ne $state.installed_user_path) { throw 'User PATH changed after installation. Nothing was overwritten; inspect install-state.json before uninstalling.' }
 }
 # Only remove a fully identified installation with no extra user files or links.
-$known = @('install-state.json') + @($state.files) + @($state.snapshots | Where-Object existed | ForEach-Object { 'backup\' + $_.name })
+$known = @('install-state.json','protection-state.json') + @($state.files) + @($state.snapshots | Where-Object existed | ForEach-Object { 'backup\' + $_.name })
 $owned = @(Get-ChildItem -LiteralPath $InstallDir -Recurse -Force)
 foreach ($item in $owned) {
     if ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) { throw 'Installation contains a link; uninstall stopped.' }

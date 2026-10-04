@@ -9,6 +9,7 @@ Set-StrictMode -Version 2.0
 . (Join-Path $PSScriptRoot 'src\InstallState.ps1')
 . (Join-Path $PSScriptRoot 'hooks\Trust.ps1')
 . (Join-Path $PSScriptRoot 'src\Storage.ps1')
+. (Join-Path $PSScriptRoot 'src\Protection.ps1')
 
 if (-not $CodexHome) { $CodexHome = $env:CODEX_HOME }
 if (-not $CodexHome) { $CodexHome = Join-Path $env:USERPROFILE '.codex' }
@@ -20,30 +21,17 @@ Assert-SafeDeleteInstallPath $InstallDir
 Assert-SafeDeleteInstallPath $CodexHome
 if ($CodexHome -eq $InstallDir -or $CodexHome.StartsWith($InstallDir + '\', [StringComparison]::OrdinalIgnoreCase) -or $InstallDir.StartsWith($CodexHome + '\', [StringComparison]::OrdinalIgnoreCase)) { throw 'InstallDir and CodexHome must be separate directories.' }
 $originalProcessPath = $env:Path
-if (-not (Get-Command codex -ErrorAction SilentlyContinue)) {
-    # Explorer does not inherit the Codex agent's PATH. Find Desktop's local binary.
-    $desktopBin = Join-Path $env:LOCALAPPDATA 'OpenAI\Codex\bin'
-    if ((Test-Path -LiteralPath $desktopBin -PathType Container) -and
-        -not ((Get-Item -LiteralPath $desktopBin).Attributes -band [IO.FileAttributes]::ReparsePoint)) {
-        Assert-SafeDeleteInstallPath $desktopBin
-        $desktopCodex = Get-ChildItem -LiteralPath $desktopBin -Directory |
-            Where-Object { -not ($_.Attributes -band [IO.FileAttributes]::ReparsePoint) } |
-            ForEach-Object { Get-Item -LiteralPath (Join-Path $_.FullName 'codex.exe') -ErrorAction SilentlyContinue } |
-            Where-Object { -not $_.PSIsContainer -and -not ($_.Attributes -band [IO.FileAttributes]::ReparsePoint) } |
-            Where-Object { try { Assert-SafeDeleteInstallPath $_.FullName; $true } catch { $false } } |
-            Sort-Object -Property @{Expression='LastWriteTimeUtc';Descending=$true},FullName | Select-Object -First 1
-        if ($desktopCodex) { $env:Path = $desktopCodex.DirectoryName + ';' + $env:Path }
-    }
-}
-$null = Get-Command codex -ErrorAction Stop
+Find-SafeDeleteCodex
 $statePath = Join-Path $InstallDir 'install-state.json'
 if (Test-Path -LiteralPath $statePath) {
     $existing = [IO.File]::ReadAllText($statePath) | ConvertFrom-Json
     Assert-SafeDeleteInstallState $existing $InstallDir
     if ($existing.phase -ne 'complete' -or $existing.codex_home -ne $CodexHome -or $existing.install_dir -ne $InstallDir) { throw 'An incomplete or different installation exists. Inspect install-state.json first.' }
+    if (-not (Test-Path -LiteralPath (Join-Path $InstallDir 'src\Protection.ps1'))) { throw 'This older installation does not support pause. Uninstall it with its original uninstaller, then install this version.' }
     $registration = Get-SafeDeleteHookRegistration -CodexHome $CodexHome -WorkingDirectory $project -HookPath (Join-Path $CodexHome 'hooks.json') -ExpectedCommand $existing.hook_command
     if ($registration.TrustStatus -notin @('trusted','managed')) { throw 'Hook trust changed. Check Codex /hooks before continuing.' }
-    Test-SafeDeleteHookCommand -HookCommand $existing.hook_command -ProjectRoot $project
+    $expected = if (Read-SafeDeleteProtectionEnabled -InstallDir $InstallDir -RequireState) { 'deny' } else { 'bypass' }
+    Test-SafeDeleteHookCommand -HookCommand $existing.hook_command -ProjectRoot $project -ExpectedDecision $expected
     $null = Initialize-SafeDeleteStore -ProjectRoot $project
     Write-Output 'Codex SafeDelete installed. (Already installed and verified.)'
     exit 0
@@ -79,6 +67,7 @@ try {
         $null = New-Item -ItemType Directory -Path ([IO.Path]::GetDirectoryName($target)) -Force
         Copy-Item -LiteralPath (Join-Path $PSScriptRoot $relative) -Destination $target
     }
+    Write-SafeDeleteJson (Join-Path $InstallDir 'protection-state.json') ([pscustomobject]@{ enabled=$true })
     $shell = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
     $shim = '@echo off' + "`r`n" + '"' + $shell + '" -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "%~dp0src\safedelete.ps1" %*' + "`r`n"
     [IO.File]::WriteAllText((Join-Path $InstallDir 'safedelete.cmd'), $shim, [Text.Encoding]::Default)
