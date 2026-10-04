@@ -1,15 +1,11 @@
 # Codex SafeDelete
 
+[English](README.md) | [简体中文](README.zh-CN.md)
+
 Local delete protection and one-command recovery for Codex on Windows.
 
 Recognized delete commands are intercepted and moved to recoverable local
 trash. `safedelete undo` restores successfully saved files and directories.
-
-![Codex SafeDelete terminal demo](assets/demo.gif)
-
-Chinese captions explain actual delete-and-restore results from an isolated
-Codex CLI run with a fixed local model fixture. Commands and output are
-excerpted; startup delays are compressed.
 
 **Local only.** No account, cloud upload or background service.
 **Protection scope:** recognized deletes; this Hook does not provide OS-level isolation.
@@ -31,6 +27,12 @@ Reopen Codex and your terminal once. That's it.
 ```powershell
 safedelete undo
 ```
+
+![Codex SafeDelete bilingual terminal demo](assets/demo.gif)
+
+Chinese and English captions explain actual delete-and-restore results from
+an isolated Codex CLI run with a fixed local model fixture. Commands and output
+are replayed excerpts; startup delays are compressed.
 
 ### Pause protection
 
