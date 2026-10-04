@@ -1,6 +1,18 @@
-Codex SafeDelete prevents AI coding agents from permanently deleting your files.
+# Codex SafeDelete
 
-Instead of trusting the AI to “be careful”, dangerous deletes are intercepted and made recoverable.
+Stop AI coding agents from permanently deleting your files.
+
+Dangerous delete commands are intercepted and made recoverable.
+
+```powershell
+.\install.ps1
+```
+
+Accidental deletion?
+
+```powershell
+safedelete undo
+```
 
 ```text
 Codex tries:
@@ -13,14 +25,16 @@ safedelete undo
 → src/ restored
 ```
 
-**Local MVP for Windows 10/11, PowerShell 5.1+, Codex Desktop and CLI.**
-No uploads, server, account, database or background service. MIT licensed.
+**Local Windows MVP.** No file uploads, server, account or background service.
+MIT licensed.
 
-Download this project, open PowerShell in its folder, and run:
+| Environment | Verification status |
+| --- | --- |
+| PowerShell 5.1 / 7 on Windows build 22631 (23H2) | Verified; a separate Windows 10 machine has not been tested |
+| Codex CLI 0.160.0 with a local `codex.exe` | Real Hook → trash → undo → uninstall verified |
+| Codex Desktop | Complete restart and Desktop deletion/recovery E2E not yet verified; do not assume Desktop protection is active |
 
-```powershell
-.\install.ps1
-```
+Download the project and run the install command above in its folder.
 
 If Windows blocks a downloaded script, after reviewing it run
 `powershell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1`.
@@ -78,13 +92,12 @@ configuration byte for byte. Uninstall restores it and removes its PATH entry;
 project trash stays available. If configuration or PATH was changed afterward,
 uninstall stops before overwriting those changes and points to the backups.
 
-Run the local acceptance suite with `pwsh -File .\tests\acceptance.ps1` or
-`powershell -ExecutionPolicy Bypass -File .\tests\acceptance.ps1`.
-The npm execution check needs Node/npm; the product itself needs neither.
-See [TEST-RESULTS.md](TEST-RESULTS.md) for actual runs and limits.
+See [TEST-RESULTS.md](TEST-RESULTS.md) for actual runs, commands and limits.
+Node/npm and Python are test tools only; the product needs neither.
 
 Verified Hook API: Codex CLI 0.160.0, [`hooks.json` / PreToolUse](https://learn.chatgpt.com/docs/hooks).
 This MVP requires a local `codex.exe` (included with Codex Desktop) and PowerShell
 as the agent's command shell. An npm `codex.cmd` launcher is not supported by
-the installer yet. Restart Desktop to reload its local configuration; a Desktop
-UI end-to-end test has not been performed.
+the installer yet. Desktop verification requires a complete restart followed
+by real file/directory deletion, recovery and uninstall checks. A successful CLI
+or local app-server test does not establish Desktop support.

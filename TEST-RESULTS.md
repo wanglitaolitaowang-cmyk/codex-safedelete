@@ -10,6 +10,22 @@ Codex CLI **0.160.0**, Git 2.55.0. Production code uses PowerShell and .NET only
 | Storage fault and tamper tests | Windows PowerShell 5.1.22621.5909 | 8/8 PASS |
 | Storage fault and tamper tests | PowerShell 7.6.5 | 8/8 PASS |
 | Real Codex install → hooks → safe delete → undo → uninstall | Codex 0.160.0 / Windows PowerShell | PASS |
+| Desktop E2E release gate | Windows Codex Desktop | NOT RUN: complete restart and real Desktop deletion/recovery not yet completed |
+
+The release review identified Windows Codex Desktop package **26.930.3930.0**.
+Its window and standard accessibility controls are accessible, but this review
+agent runs under the Desktop process. A complete exit terminates the reviewer.
+The current session has not demonstrated reliable unattended restart and
+continuation. A manual restart and resumed Desktop test are required before
+this gate can be marked PASS. This is an incomplete validation, not evidence
+that Desktop does not support the Hook.
+
+The real default installation has now succeeded as part of this Desktop review:
+`install.ps1` exited 0, reported an enabled/trusted Hook, and passed its exact
+Hook-command runtime check. Original configuration and user PATH checksums were
+saved locally. Complete Desktop restart, file/directory recovery, danger-command
+checks and real uninstall verification remain pending; installation alone is
+not a Desktop E2E PASS.
 
 The real Codex test uses a fixed model fixture served only on loopback. No
 remote model, authentication or user files are used. Non-local proxy traffic is
