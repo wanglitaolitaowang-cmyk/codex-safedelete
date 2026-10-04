@@ -1,0 +1,5 @@
+.codex-safedelete/
+work/
+tests/.tmp/
+tests/.work/
+*.tmp
