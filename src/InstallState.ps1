@@ -398,7 +398,7 @@ function Test-SafeDeleteDesktopPipeChange {
 }
 
 function Restore-SafeDeleteConfiguration {
-    param($State, [string]$InstallDir)
+    param($State, [string]$InstallDir, [hashtable]$OwnedHashes)
     Assert-SafeDeleteInstallState $State $InstallDir
     # Verify every backup before restoring the first file.
     foreach ($entry in @($State.snapshots | Where-Object existed)) {
@@ -407,6 +407,14 @@ function Restore-SafeDeleteConfiguration {
         if ((Get-SafeDeleteFileHash $backup) -ne $entry.original_hash) { throw ('Backup checksum mismatch: ' + $entry.name) }
     }
     foreach ($entry in @($State.snapshots)) {
+        if ($null -ne $OwnedHashes) {
+            Assert-SafeDeleteInstallPath $entry.path
+            $liveHash = Get-SafeDeleteFileHash $entry.path
+            if (-not $OwnedHashes.ContainsKey($entry.name) -or
+                ($liveHash -cne $entry.original_hash -and $liveHash -cne $OwnedHashes[$entry.name])) {
+                throw ('Configuration ownership is uncertain or another process changed ' + $entry.name + '; live contents were preserved for manual recovery.')
+            }
+        }
         if ($entry.existed) {
             $backup = Join-Path $InstallDir ('backup\' + $entry.name)
             Write-SafeDeleteBytes $entry.path ([IO.File]::ReadAllBytes($backup))
@@ -570,13 +578,15 @@ function Invoke-SafeDeleteLegacyMigration {
         $hookRollback.owned_hash = Get-SafeDeleteBytesHash $hookBytes
         $configurationChanged = $true
         Write-SafeDeleteBytes $hookFile $hookBytes
-        $registration = Get-SafeDeleteHookRegistration -CodexHome $CodexHome -WorkingDirectory $ProjectRoot -HookPath $hookFile -ExpectedCommand $state.hook_command -Trust
-        # A successful trust RPC identifies the config.toml write as this
-        # transaction's result. On an uncertain/failed RPC its original hash
-        # remains the only configuration version we can safely restore.
-        if ((Get-SafeDeleteFileHash $hookFile) -cne $hookRollback.owned_hash) { throw 'hooks.json changed during Hook verification. Its newer contents were preserved.' }
         $configRollback = @($rollbackSnapshots | Where-Object { $_.name -ceq 'config.toml' })[0]
-        $configRollback.owned_hash = Get-SafeDeleteFileHash $configRollback.path
+        $configReceipt = @{ Hash=$null }
+        try {
+            $registration = Get-SafeDeleteHookRegistration -CodexHome $CodexHome -WorkingDirectory $ProjectRoot -HookPath $hookFile -ExpectedCommand $state.hook_command -Trust -ExpectedConfigHash $configRollback.owned_hash -ConfigWriteReceipt $configReceipt
+        } finally {
+            if ($null -ne $configReceipt.Hash) { $configRollback.owned_hash = $configReceipt.Hash }
+        }
+        if ((Get-SafeDeleteFileHash $hookFile) -cne $hookRollback.owned_hash) { throw 'hooks.json changed during Hook verification. Its newer contents were preserved.' }
+        if ($null -eq $configReceipt.Hash -or (Get-SafeDeleteFileHash $configRollback.path) -cne $configReceipt.Hash) { throw 'config.toml changed during Hook verification. Its newer contents were preserved.' }
         if ($registration.TrustStatus -notin @('trusted','managed') -or -not $registration.Enabled) { throw 'Codex did not verify the migrated Hook as enabled and trusted.' }
         $expected = if ($enabled) { 'deny' } else { 'bypass' }
         Test-SafeDeleteHookCommand -HookCommand $state.hook_command -ProjectRoot $ProjectRoot -ExpectedDecision $expected

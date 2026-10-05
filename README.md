@@ -96,9 +96,13 @@ MIT licensed.
 | Windows 7 / 8, or Windows 10 before 1809 | Codex integration is unsupported; installation stops before changing configuration |
 | Linux / macOS | No installer or platform adaptation yet; not supported by this release |
 
-The full Desktop exit/restart results are from an earlier run. This MVP repair
-batch did not repeat the complete GUI restart sequence; see
-[TEST-RESULTS.md](TEST-RESULTS.md) for each run and retained failures.
+The 2026-10-05 repair passed actual upgrade, default uninstall/reinstall and,
+after the user-confirmed complete Desktop restart, deletion interception,
+explicit-ID recovery and patch deletion refusal. Reopen Codex and terminals
+after installing or upgrading; the already-running conversation's first
+post-install deletion was not intercepted. See
+[current verification](VERIFICATION-20261005.md) and
+[TEST-RESULTS.md](TEST-RESULTS.md) for the tested scope and retained failures.
 
 The installer requires Windows 10 version 1809 (build 17763) or newer and PowerShell 5.1 or
 newer. This follows [Codex's Windows requirements](https://developers.openai.com/codex/windows).

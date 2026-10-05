@@ -228,17 +228,72 @@ function Select-SafeDeleteHookRegistration {
     }
 }
 
+function Get-SafeDeleteTrustConfigurationHash {
+    param([string]$Path, [byte[]]$Bytes)
+    if ($PSBoundParameters.ContainsKey('Path')) {
+        if (-not [IO.File]::Exists($Path)) { return $null }
+        $Bytes = [IO.File]::ReadAllBytes($Path)
+    }
+    $sha = [Security.Cryptography.SHA256]::Create()
+    try { return [BitConverter]::ToString($sha.ComputeHash($Bytes)).Replace('-', '') }
+    finally { $sha.Dispose() }
+}
+
+function Get-SafeDeleteTrustConfigurationPreview {
+    param([string]$WorkingDirectory, [byte[]]$ConfigBytes, [object[]]$Edits)
+    # SDK versions fingerprint TOML values, not file bytes. Replay its exact
+    # edits on our saved bytes so comments and unrelated settings stay guarded.
+    $temporaryRoot = [IO.Path]::GetFullPath([IO.Path]::GetTempPath()).TrimEnd([char[]]'\/')
+    $name = 'codex-safedelete-trust-' + [Guid]::NewGuid().ToString('N')
+    $directory = [IO.Path]::GetFullPath((Join-Path $temporaryRoot $name))
+    if ([IO.Directory]::GetParent($directory).FullName -cne $temporaryRoot -or
+        [IO.Directory]::Exists($directory) -or [IO.File]::Exists($directory)) { throw 'Cannot create an isolated configuration preview.' }
+    $server = $null
+    try {
+        $null = [IO.Directory]::CreateDirectory($directory)
+        $configPath = Join-Path $directory 'config.toml'
+        [IO.File]::WriteAllBytes($configPath, $ConfigBytes)
+        $baselineHash = Get-SafeDeleteTrustConfigurationHash -Bytes $ConfigBytes
+        $server = Start-SafeDeleteHookServer $directory $WorkingDirectory -EnableHooks
+        if ((Get-SafeDeleteTrustConfigurationHash -Path $configPath) -cne $baselineHash) { throw 'The SDK changed the configuration preview before its edits.' }
+        $null = Invoke-SafeDeleteHookRpc $server 'config/batchWrite' @{ edits=$Edits; filePath=$configPath }
+        $hash = Get-SafeDeleteTrustConfigurationHash -Path $configPath
+        if ($hash -notmatch '^[0-9A-F]{64}$') { throw 'The SDK did not produce a configuration preview.' }
+        return $hash
+    } finally {
+        try { Stop-SafeDeleteHookServer $server }
+        finally {
+            # This exact, newly created child is the only recursive cleanup target.
+            if ([IO.Path]::GetFullPath($directory) -cne (Join-Path $temporaryRoot $name) -or
+                [IO.Directory]::GetParent($directory).FullName -cne $temporaryRoot) { throw 'Configuration preview cleanup path changed.' }
+            if ([IO.Directory]::Exists($directory)) { [IO.Directory]::Delete($directory, $true) }
+        }
+    }
+}
+
 function Get-SafeDeleteHookRegistration {
     param(
         [Parameter(Mandatory = $true)][string]$CodexHome,
         [Parameter(Mandatory = $true)][string]$WorkingDirectory,
         [Parameter(Mandatory = $true)][string]$HookPath,
         [Parameter(Mandatory = $true)][string]$ExpectedCommand,
-        [switch]$Trust
+        [switch]$Trust,
+        [AllowNull()][AllowEmptyString()][string]$ExpectedConfigHash,
+        [hashtable]$ConfigWriteReceipt
     )
     $CodexHome = [System.IO.Path]::GetFullPath($CodexHome)
     $WorkingDirectory = [System.IO.Path]::GetFullPath($WorkingDirectory)
     $HookPath = [System.IO.Path]::GetFullPath($HookPath)
+    $configPath = Join-Path $CodexHome 'config.toml'
+    $configWriteHash = $null
+    if ($Trust) {
+        if ($null -ne $ConfigWriteReceipt) { $ConfigWriteReceipt.Hash = $null }
+        $configExists = [IO.File]::Exists($configPath)
+        [byte[]]$configBytes = @()
+        if ($configExists) { $configBytes = [IO.File]::ReadAllBytes($configPath) }
+        $baselineHash = if ($configExists) { Get-SafeDeleteTrustConfigurationHash -Bytes $configBytes } else { $null }
+        if ($PSBoundParameters.ContainsKey('ExpectedConfigHash') -and [string]$baselineHash -cne $ExpectedConfigHash) { throw 'config.toml changed before Hook verification. Its newer contents were preserved.' }
+    }
     $server = $null
     try {
         $server = Start-SafeDeleteHookServer $CodexHome $WorkingDirectory -EnableHooks:$Trust
@@ -247,12 +302,17 @@ function Get-SafeDeleteHookRegistration {
         if ($Trust) {
             $state = @{}
             $state[$hook.key] = @{ trusted_hash = $hook.currentHash }
-            $null = Invoke-SafeDeleteHookRpc $server 'config/batchWrite' @{
-                edits = @(
-                    @{ keyPath = 'features.hooks'; value = $true; mergeStrategy = 'upsert' },
-                    @{ keyPath = 'hooks.state'; value = $state; mergeStrategy = 'upsert' }
-                )
-            }
+            $edits = @(
+                @{ keyPath = 'features.hooks'; value = $true; mergeStrategy = 'upsert' },
+                @{ keyPath = 'hooks.state'; value = $state; mergeStrategy = 'upsert' }
+            )
+            $configWriteHash = Get-SafeDeleteTrustConfigurationPreview -WorkingDirectory $WorkingDirectory -ConfigBytes $configBytes -Edits $edits
+            if ((Get-SafeDeleteTrustConfigurationHash -Path $configPath) -cne $baselineHash) { throw 'config.toml changed before the SDK write. Its newer contents were preserved.' }
+            # Publish the independently derived version before a possibly uncertain
+            # write/reload result; callers can still roll back exactly these bytes.
+            if ($null -ne $ConfigWriteReceipt) { $ConfigWriteReceipt.Hash = $configWriteHash }
+            $null = Invoke-SafeDeleteHookRpc $server 'config/batchWrite' @{ edits=$edits; filePath=$configPath }
+            if ((Get-SafeDeleteTrustConfigurationHash -Path $configPath) -cne $configWriteHash) { throw 'config.toml differs from the SDK configuration preview. Its newer contents were preserved.' }
             # Reload from disk without a flag override before confirming protection.
             Stop-SafeDeleteHookServer $server
             $server = $null
@@ -264,10 +324,12 @@ function Get-SafeDeleteHookRegistration {
                 throw 'Codex did not confirm the same SafeDelete hook as enabled and trusted.'
             }
             $hook = $verified
+            if ((Get-SafeDeleteTrustConfigurationHash -Path $configPath) -cne $configWriteHash) { throw 'config.toml changed during Hook verification. Its newer contents were preserved.' }
         }
         return [pscustomobject]@{
             Key = $hook.key; CurrentHash = $hook.currentHash; TrustStatus = $hook.trustStatus
             Enabled = $hook.enabled; Matcher = $hook.matcher; SourcePath = $hook.sourcePath
+            ConfigWriteHash = $configWriteHash
         }
     } finally { Stop-SafeDeleteHookServer $server }
 }

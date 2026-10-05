@@ -117,6 +117,8 @@ try {
     $createdInstallDirectory = -not (Test-SDExists $InstallDir)
     $createdBackupDirectory = -not (Test-SDExists $backupDirectory)
     $attemptedBackups = New-Object 'System.Collections.Generic.List[string]'
+    $configOwnership = @{}
+    foreach ($snapshot in $snapshots) { $configOwnership[$snapshot.name] = $snapshot.original_hash }
     $preparationComplete = $false
     try {
         $null = New-Item -ItemType Directory -Path $InstallDir -Force
@@ -149,8 +151,18 @@ try {
         $state.hook_command = $expectedHookCommand
         $entry = [pscustomobject]@{ matcher='^(Bash|apply_patch)$'; hooks=@([pscustomobject]@{ type='command'; command=$state.hook_command; timeout=30; statusMessage='Codex SafeDelete' }) }
         $configuration.hooks | Add-Member NoteProperty PreToolUse @($prior + $entry) -Force
+        foreach ($snapshot in $snapshots) {
+            if ((Get-SafeDeleteFileHash $snapshot.path) -cne $snapshot.original_hash) { throw ('Codex configuration changed during installation preparation: ' + $snapshot.name + '. Its newer contents were preserved.') }
+        }
+        $configOwnership['hooks.json'] = Get-SafeDeleteBytesHash ((New-Object Text.UTF8Encoding($false)).GetBytes(($configuration | ConvertTo-Json -Depth 30)))
         Write-SafeDeleteJson $hookFile $configuration
-        $registration = Get-SafeDeleteHookRegistration -CodexHome $CodexHome -WorkingDirectory $project -HookPath $hookFile -ExpectedCommand $state.hook_command -Trust
+        $configReceipt = @{ Hash=$null }
+        try {
+            $registration = Get-SafeDeleteHookRegistration -CodexHome $CodexHome -WorkingDirectory $project -HookPath $hookFile -ExpectedCommand $state.hook_command -Trust -ExpectedConfigHash $configOwnership['config.toml'] -ConfigWriteReceipt $configReceipt
+        } finally {
+            if ($null -ne $configReceipt.Hash) { $configOwnership['config.toml'] = $configReceipt.Hash }
+        }
+        if ($null -eq $configReceipt.Hash -or (Get-SafeDeleteFileHash (Join-Path $CodexHome 'config.toml')) -cne $configReceipt.Hash) { throw 'config.toml changed during Hook verification. Its newer contents were preserved.' }
         if ($registration.TrustStatus -notin @('trusted','managed') -or -not $registration.Enabled) { throw 'Codex did not verify the hook as enabled and trusted.' }
         Test-SafeDeleteHookCommand -HookCommand $state.hook_command -ProjectRoot $project
         $null = Initialize-SafeDeleteStore -ProjectRoot $project
@@ -163,7 +175,10 @@ try {
             } else { $state.installed_user_path = $userPath }
             $env:Path = $InstallDir + ';' + $env:Path
         }
-        foreach ($snapshot in $state.snapshots) { $snapshot.installed_hash = Get-SafeDeleteFileHash $snapshot.path }
+        foreach ($snapshot in $state.snapshots) {
+            $snapshot.installed_hash = Get-SafeDeleteFileHash $snapshot.path
+            if ($snapshot.installed_hash -cne $configOwnership[$snapshot.name]) { throw ('Codex configuration changed after Hook verification: ' + $snapshot.name + '. Its newer contents were preserved.') }
+        }
         $installedConfig = @($state.snapshots | Where-Object { $_.name -ceq 'config.toml' })[0]
         $installedConfigBytes = [IO.File]::ReadAllBytes($installedConfig.path)
         if ((Get-SafeDeleteBytesHash $installedConfigBytes) -cne $installedConfig.installed_hash) { throw 'Codex configuration changed while preparing its comparison reference.' }
@@ -221,7 +236,8 @@ try {
         # final state write must never leave a state that permits normal uninstall.
         $state.phase = 'rolling-back'
         Write-SafeDeleteJson $statePath $state
-        Restore-SafeDeleteConfiguration -State $state -InstallDir $InstallDir
+        try { Restore-SafeDeleteConfiguration -State $state -InstallDir $InstallDir -OwnedHashes $configOwnership }
+        catch { throw ('Installation failed and rollback requires inspection. Preserve the installation and backups. ' + $_.Exception.Message + ' Original error: ' + $failure.Exception.Message) }
         $state.phase = 'rolled-back'
         Write-SafeDeleteJson $statePath $state
         throw $failure

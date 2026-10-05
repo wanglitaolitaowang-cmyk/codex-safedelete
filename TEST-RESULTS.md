@@ -1,5 +1,82 @@
 # Actual test results
 
+## Configuration ownership repair — 2026-10-05 (UTC+08:00)
+
+This repair prevents configuration written concurrently with SDK Hook trust from
+being claimed as the installer's output and later overwritten by rollback or
+default uninstall. Trust now replays the same edits on independently saved
+configuration bytes in a temporary local `CODEX_HOME`, using the same native
+SDK and actual Hook key/hash. The real configuration must still match its saved
+baseline before writing, then match the preview's file-byte SHA256 after writing
+and reloading. The expected hash is published before the real write so rollback
+can identify known SDK output even when the write result or reload fails.
+Fresh installation and legacy migration both use this ownership check.
+
+The tested version is the **uncommitted workspace repair based on
+`586a487ef0732a115206d1019ad8a38118ba1fb4`**; that commit alone does not identify
+the repair. The final paired run verified all **14 frozen source/test files**
+against workspace bytes before and after execution, with no changed files.
+See the [repair report](work/configuration-ownership-fix-20261005.md),
+[final paired full run](tests/.work/tr-20261004-163246-0d369781/pair-results.json)
+and [independent full audit](tests/.work/configuration-ownership-fix-20261004/full-regression-root-audit.json).
+
+Completed checks used Windows PowerShell **5.1.22621.5909** and PowerShell
+**7.6.5**, native Codex CLI **0.160.0**, and isolated workspace fixtures:
+
+| Completed validation | PowerShell 5.1 | PowerShell 7 | Evidence scope |
+| --- | --- | --- | --- |
+| Hook trust protocol regression | 60/60 PASS | 60/60 PASS | Production preview helper; SDK startup/RPC mocked against independent fixture files |
+| Protection controls and uninstall | 27/27 PASS | 27/27 PASS | Real isolated installation, pause/resume, ownership guards and uninstall; complete JSONL audit |
+| Installation preflight | 5/5 PASS | 5/5 PASS | Malformed Hooks refused; configuration, nonempty history, payload and PATH preserved |
+| Hook self-check | 3/3 PASS | 3/3 PASS | Each runtime checked 12 real controlled Hook responses: 2 healthy accepted, 10 unhealthy rejected |
+| Cold native Codex CLI | PASS | PASS | Actual SDK, tools and Hook; deterministic local loopback model service |
+| Targeted trust concurrency subset | 14/14 PASS | 14/14 PASS | Real SDK with explicit fault injection; included in the full suite below |
+| Full installation-location and migration regression | 43/43 PASS | 43/43 PASS | Real isolated SDK/Hook, concurrency recovery and Desktop configuration compatibility |
+
+The targeted 14 cases were rerun inside the full 43-case suite; they are not
+added again to a unique-case total. The final full pair exited **0/0**, with
+**86/86** cases passing. Both reports were parsed in full, including **220**
+child-process records and both sets of six source hashes, with no errors or
+hash mismatches. The paired cold CLI run retained **8 JSONL files / 48 events**,
+all fully parsed, and used `danger-full-access` with synthetic requests; it does
+not establish Desktop permission behavior or online-model compatibility.
+Supporting evidence is linked from the repair report, including the
+[cold CLI audit](tests/.work/configuration-ownership-fix-20261004/native-cli/pair-20261004-160125-80111ca3/independent-audit.json)
+and [preflight/self-check audit](tests/.work/configuration-ownership-fix-20261004/supporting/validation-summary.json).
+
+The concurrency and recovery tests exercise the real local SDK with explicitly
+injected writes, failures and timeouts at defined boundaries. AppData/package
+cache layouts are synthetic; injected timeouts are not real network-timeout
+tests. This repair closes the reproduced ownership/overwrite chain. It is not
+a file-level compare-and-swap operation and does not eliminate the SDK's own
+read-to-write window or every cross-process race. The configuration preview
+uses a temporary local configuration copy and normally removes it after stopping
+the SDK process.
+
+Actual-machine upgrade and repaired-version default uninstall/reinstall both
+passed. All four install/uninstall processes exited **0**, with **0 stderr
+bytes**. The original configuration and User PATH were restored at uninstall;
+**11/11 installed source files**, the legacy cache and all **587 existing
+recovery-store files** were verified. Final protection is **ON**.
+See [upgrade evidence](work/machine-update-20261005-d0c721dc/Upgrade-result.json)
+and [uninstall/reinstall evidence](work/machine-update-20261005-d0c721dc/VerifyUninstall-result.json).
+
+The still-running conversation's first synthetic deletion after reinstall did
+not create a recovery record. Its independently backed-up synthetic data was
+restored; user data and existing history were preserved. After the user
+confirmed a complete Codex GUI exit/restart, the same actual Desktop tool route
+rewrote deletion into recoverable storage. Restoring its explicit record ID
+preserved all **256 binary bytes**, a path containing Unicode, spaces, brackets,
+an apostrophe and an ampersand, and a **directory tree with two levels and no files**. All **27 existing
+history records** retained their full fields; the new record is `restored`.
+Actual `apply_patch` deletion was refused by the SafeDelete PreToolUse Hook,
+with the text probe unchanged. The new conversation resolves `safedelete` to
+the shared installation. Reopening Codex and terminals remains an installation
+requirement; hot reload during an already-running conversation is not certified.
+See [current release verification](VERIFICATION-20261005.md),
+[actual deletion/recovery](work/machine-update-20261005-d0c721dc/desktop-delete-restore-after-restart.json)
+and [actual patch refusal](work/machine-update-20261005-d0c721dc/desktop-patch-tool-response.json).
+
 Tested locally on **2026-10-04 (UTC+08:00)**. Windows build 22631 (23H2),
 Codex CLI **0.160.0**, Git 2.55.0. Production code uses PowerShell and .NET only.
 

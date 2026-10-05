@@ -4,7 +4,8 @@
 param(
     [string]$SourceRoot,
     [string]$ArtifactRoot,
-    [string]$ShellPath = ([Diagnostics.Process]::GetCurrentProcess().MainModule.FileName)
+    [string]$ShellPath = ([Diagnostics.Process]::GetCurrentProcess().MainModule.FileName),
+    [string]$CaseFilter = '*'
 )
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version 2.0
@@ -62,6 +63,14 @@ function Invoke-Process([string[]]$Arguments,$Fixture) {
     $start.EnvironmentVariables['USERPROFILE'] = $Fixture.profile
     $start.EnvironmentVariables['LOCALAPPDATA'] = $Fixture.localAppData
     $start.EnvironmentVariables['CODEX_HOME'] = $Fixture.codexHome
+    $start.EnvironmentVariables['TEMP'] = $Fixture.tempRoot
+    $start.EnvironmentVariables['TMP'] = $Fixture.tempRoot
+    if ($Fixture.PSObject.Properties['testEnvironment']) {
+        foreach ($name in $Fixture.testEnvironment.Keys) {
+            if (-not $name.StartsWith('SAFEDELETE_TEST_',[StringComparison]::Ordinal)) { throw 'Invalid fixture-only environment name.' }
+            $start.EnvironmentVariables[$name] = [string]$Fixture.testEnvironment[$name]
+        }
+    }
     $process = New-Object Diagnostics.Process
     $process.StartInfo = $start
     try {
@@ -109,14 +118,15 @@ function New-Fixture([string]$Name) {
     $localAppData = Join-Path $profile 'AppData\Local'
     $codexHome = Join-Path $root 'custom-codex-home'
     $project = Join-Path $root 'project'
-    foreach ($directory in @($localAppData,$codexHome,(Join-Path $project '.codex-safedelete'))) { $null = [IO.Directory]::CreateDirectory($directory) }
+    $tempRoot = Join-Path $root 'temporary-sdk-home'
+    foreach ($directory in @($localAppData,$codexHome,$tempRoot,(Join-Path $project '.codex-safedelete'))) { $null = [IO.Directory]::CreateDirectory($directory) }
     $configPath = Join-Path $codexHome 'config.toml'
     $hooksPath = Join-Path $codexHome 'hooks.json'
     [IO.File]::WriteAllText($configPath,"# isolated user settings`r`n",$encoding)
     $baselineHooks = '{"hooks":{"PreToolUse":[{"matcher":"^ForeignBefore$","hooks":[{"type":"command","command":"echo foreign-before","timeout":11,"statusMessage":"foreign before"}]},{"matcher":"^ForeignAfter$","hooks":[{"type":"command","command":"echo foreign-after","timeout":12,"statusMessage":"foreign after"}]}]},"description":"fixture baseline"}'
     [IO.File]::WriteAllText($hooksPath,$baselineHooks,$encoding)
     return [pscustomobject]@{
-        root=$root; profile=$profile; localAppData=$localAppData; codexHome=$codexHome; project=$project
+        root=$root; profile=$profile; localAppData=$localAppData; codexHome=$codexHome; project=$project; tempRoot=$tempRoot
         logicalLegacy=(Join-Path $localAppData 'CodexSafeDelete')
         physicalLegacy=(Join-Path $localAppData 'Packages\OpenAI.Codex_fixturefamily\LocalCache\Local\CodexSafeDelete')
         defaultInstall=(Join-Path $profile '.codex-safedelete-app')
@@ -230,12 +240,14 @@ function Assert-Migrated($Fixture) {
     return [pscustomobject]@{ fixture=$Fixture.root; legacy=$Fixture.legacy; destination=$Fixture.defaultInstall; hookGroupCount=$groups.Count; foreignHooksAndPositionsPreserved=$true; originalBackupsPreserved=$true; protectionEnabled=$protection.enabled }
 }
 function Invoke-Case([string]$Name,[scriptblock]$Body) {
+    if ($Name -notlike $CaseFilter) { return }
     $script:caseProcesses = New-Object 'System.Collections.Generic.List[object]'
     $status = 'PASS'; $errorMessage = $null; $evidence = $null
     try { $evidence = & $Body } catch { $status = 'FAIL'; $errorMessage = $_.Exception.Message }
     $results.Add([pscustomobject]@{ name=$Name; result=$status; error=$errorMessage; evidence=$evidence; processes=@($script:caseProcesses.ToArray()) })
 }
 $sourceHashes = @(@('install.ps1','uninstall.ps1','src\InstallState.ps1','src\Storage.ps1','hooks\Trust.ps1','hooks\pre-tool-use.ps1') | ForEach-Object { [pscustomobject]@{ path=$_; hash=(Get-Hash (Join-Path $SourceRoot $_)) } })
+. (Join-Path $PSScriptRoot 'helpers\trust-concurrency.ps1')
 
 Invoke-Case 'default uses a profile directory outside AppData and custom CodexHome' {
     $fixture = New-Fixture 'default-helper'
@@ -306,7 +318,8 @@ Invoke-Case 'default fresh installation repeats and uninstalls with original con
 }
 foreach ($originalExisted in @($true,$false)) {
     $label = if ($originalExisted) { 'existing-config' } else { 'absent-config' }
-    Invoke-Case ('fresh ' + $label + ' installation permits only a Desktop pipe rotation before restoring its baseline') {
+    $caseName = if ($originalExisted) { 'fresh existing-config installation permits only a Desktop pipe rotation before restoring its baseline' } else { 'fresh absent-config installation refuses Desktop configuration generated after SDK Trust' }
+    Invoke-Case $caseName {
         $fixture = New-Fixture ('fresh-pipe-' + $label)
         $pipeOne = '11111111-1111-4111-8111-111111111111'
         $pipeTwo = '22222222-2222-4222-8222-222222222222'
@@ -320,20 +333,25 @@ foreach ($originalExisted in @($true,$false)) {
             Assert-True ($absoluteConfig.StartsWith($runRoot + '\',[StringComparison]::OrdinalIgnoreCase)) 'Absent-config fixture removal escaped the run directory.'
             Remove-Item -LiteralPath $absoluteConfig -Force
             $fixture.configBaseline = $null
-            $source = New-SourceFixture 'desktop-generated-config-source'
-            # Keep the real SDK registration and trust operation. Then simulate
-            # Desktop generating its pipe setting before the installer records
-            # the completed configuration, with an originally absent baseline.
+            $source = New-SourceFixture 'src-pipe-late'
+            # A Desktop setting appended after verified SDK Trust is a concurrent
+            # user write. Forward the actual receipt unchanged; installation must
+            # preserve the generated configuration and refuse to claim ownership.
             $wrapper = @'
 $script:InstallLocationOriginalHookRegistration = ${function:Get-SafeDeleteHookRegistration}
 function Get-SafeDeleteHookRegistration {
-    param([string]$CodexHome,[string]$WorkingDirectory,[string]$HookPath,[string]$ExpectedCommand,[switch]$Trust)
-    $result = & $script:InstallLocationOriginalHookRegistration -CodexHome $CodexHome -WorkingDirectory $WorkingDirectory -HookPath $HookPath -ExpectedCommand $ExpectedCommand -Trust:$Trust
+    param([string]$CodexHome,[string]$WorkingDirectory,[string]$HookPath,[string]$ExpectedCommand,[switch]$Trust,
+        [AllowNull()][AllowEmptyString()][string]$ExpectedConfigHash,[hashtable]$ConfigWriteReceipt)
+    $result = & $script:InstallLocationOriginalHookRegistration @PSBoundParameters
     if ($Trust) {
         $configPath = Join-Path $CodexHome 'config.toml'
         if (-not [IO.File]::Exists($configPath)) { throw 'Real SDK did not generate the fixture configuration.' }
+        [IO.File]::WriteAllText((Join-Path ([IO.Path]::GetDirectoryName($CodexHome)) 'desktop-trust-result.json'),
+            ([pscustomobject]@{key=$result.Key;currentHash=$result.CurrentHash;trustStatus=$result.TrustStatus;enabled=$result.Enabled;configWriteHash=$result.ConfigWriteHash;hookFileSha256=(Get-SafeDeleteFileHash $HookPath)} | ConvertTo-Json -Depth 4),
+            (New-Object Text.UTF8Encoding($false)))
         $suffix = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('PIPE_SUFFIX_BASE64'))
         [IO.File]::AppendAllText($configPath,$suffix,(New-Object Text.UTF8Encoding($false)))
+        [IO.File]::WriteAllBytes((Join-Path ([IO.Path]::GetDirectoryName($CodexHome)) 'desktop-config-after-sdk.toml'),[IO.File]::ReadAllBytes($configPath))
     }
     return $result
 }
@@ -342,6 +360,52 @@ function Get-SafeDeleteHookRegistration {
             [IO.File]::AppendAllText((Join-Path $source 'hooks\Trust.ps1'),"`r`n" + $wrapper,$encoding)
         }
         $installed = Invoke-Install $fixture '' $source
+        if (-not $originalExisted) {
+            Assert-True ($installed.exitCode -ne 0) 'Fresh installation accepted concurrent Desktop-generated configuration as its own SDK write.'
+            $preservedHash = Get-Hash (Join-Path $fixture.root 'desktop-config-after-sdk.toml')
+            Assert-True ((Get-Hash $fixture.configPath) -ceq $preservedHash -and [IO.File]::ReadAllText($fixture.configPath).Contains($pipeOne)) 'Fresh rollback removed or changed concurrently generated Desktop configuration.'
+            $state = [IO.File]::ReadAllText((Join-Path $fixture.defaultInstall 'install-state.json')) | ConvertFrom-Json
+            Assert-True ($state.phase -ceq 'rolling-back') 'Concurrent Desktop configuration did not preserve an unresolved installation phase.'
+            # Fresh rollback preflights both files before restoring either one.
+            # Its own Hook may remain while configuration ownership is uncertain;
+            # every third-party group and all unrelated metadata must be intact.
+            $originalHooks=[IO.File]::ReadAllText((Join-Path $fixture.defaultInstall 'backup\hooks.json')) | ConvertFrom-Json
+            $currentHooks=[IO.File]::ReadAllText($fixture.hooksPath) | ConvertFrom-Json
+            $ownedGroups=@($currentHooks.hooks.PreToolUse | Where-Object { $_.matcher -ceq '^(Bash|apply_patch)$' -and @($_.hooks).Count -eq 1 -and $_.hooks[0].command -ceq $state.hook_command })
+            Assert-True ($ownedGroups.Count -eq 1) 'Uncertain fresh installation did not retain exactly its own identifiable Hook.'
+            $ownedHandlers=@($currentHooks.hooks.PreToolUse | ForEach-Object {$_.hooks} | Where-Object {$_.command -ceq $state.hook_command})
+            Assert-True ($ownedHandlers.Count -eq 1 -and $ownedHandlers[0].type -ceq 'command') 'Uncertain fresh installation retained a malformed or duplicated SafeDelete handler.'
+            $trustedBeforeAppend=[IO.File]::ReadAllText((Join-Path $fixture.root 'desktop-trust-result.json')) | ConvertFrom-Json
+            Assert-True ((Get-Hash $fixture.hooksPath) -ceq $trustedBeforeAppend.hookFileSha256) 'The complete configured Hook changed after actual SDK Trust.'
+            $currentHooks.hooks.PreToolUse=@($currentHooks.hooks.PreToolUse | Where-Object { -not ($_.matcher -ceq '^(Bash|apply_patch)$' -and @($_.hooks).Count -eq 1 -and $_.hooks[0].command -ceq $state.hook_command) })
+            Assert-True (($currentHooks | ConvertTo-Json -Depth 12 -Compress) -ceq ($originalHooks | ConvertTo-Json -Depth 12 -Compress)) 'Rejected fresh installation changed third-party Hook groups, their order or unrelated metadata.'
+            $retainedHooksHash=Get-Hash $fixture.hooksPath
+            $verify=@'
+$ErrorActionPreference='Stop'
+[Console]::OutputEncoding=New-Object Text.UTF8Encoding($false)
+. TRUST_LITERAL
+Get-SafeDeleteHookRegistration -CodexHome HOME_LITERAL -WorkingDirectory PROJECT_LITERAL -HookPath HOOKS_LITERAL -ExpectedCommand COMMAND_LITERAL | ConvertTo-Json -Depth 5 -Compress
+'@
+            foreach($replacement in @(
+                @{token='TRUST_LITERAL';value=(Join-Path $SourceRoot 'hooks\Trust.ps1')},
+                @{token='HOME_LITERAL';value=$fixture.codexHome},
+                @{token='PROJECT_LITERAL';value=$fixture.project},
+                @{token='HOOKS_LITERAL';value=$fixture.hooksPath},
+                @{token='COMMAND_LITERAL';value=$state.hook_command}
+            )){$verify=$verify.Replace($replacement.token,"'" + $replacement.value.Replace("'","''") + "'")}
+            $verifyPath=Join-Path $fixture.root 'verify-retained-hook.ps1'
+            [IO.File]::WriteAllText($verifyPath,$verify,(New-Object Text.UTF8Encoding($true)))
+            $verified=Invoke-Process @('-NoLogo','-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',$verifyPath) $fixture
+            Assert-True ($verified.exitCode -eq 0) 'Actual SDK could not verify the retained SafeDelete Hook after concurrent Desktop generation.'
+            $currentRegistration=$verified.stdout | ConvertFrom-Json
+            Assert-True ($currentRegistration.Key -ceq $trustedBeforeAppend.key -and $currentRegistration.CurrentHash -ceq $trustedBeforeAppend.currentHash -and $currentRegistration.TrustStatus -ceq 'trusted' -and $currentRegistration.Enabled) 'Retained Hook SDK identity, hash, trust or enablement changed.'
+            $destinationBefore = @(Get-Snapshot $fixture.defaultInstall)
+            $uninstalled = Invoke-Uninstall $fixture ''
+            Assert-True ($uninstalled.exitCode -ne 0) 'Default uninstall accepted the preserved concurrent Desktop-generated configuration.'
+            Assert-True ((Get-Hash $fixture.configPath) -ceq $preservedHash -and (Get-Hash $fixture.hooksPath) -ceq $retainedHooksHash) 'Refused uninstall changed generated Desktop configuration or retained Hooks.'
+            Assert-Unchanged $fixture.defaultInstall $destinationBefore
+            return [pscustomobject]@{fixture=$fixture.root;originalConfigurationExisted=$false;actualSdkTrustUsed=$true;desktopSettingGeneratedAfterTrust=$true;safeInstallationRefusal=$true;generatedConfigurationBytesPreserved=$true;thirdPartyHookStructureAndOrderPreserved=$true;retainedOwnHandlerCompleteAndUnique=$true;actualSdkMetadataUnchanged=$true;defaultUninstallSafelyRefused=$true;preservedConfigSha256=$preservedHash}
+        }
         Assert-True ($installed.exitCode -eq 0) 'Fresh pipe fixture installation failed; see process evidence.'
         $reference = Assert-InstalledReference $fixture $originalExisted
         $installedText = [IO.File]::ReadAllText($fixture.configPath)
@@ -351,8 +415,50 @@ function Get-SafeDeleteHookRegistration {
         $uninstalled = Invoke-Uninstall $fixture ''
         Assert-True ($uninstalled.exitCode -eq 0) 'Fresh installation refused a verified Desktop pipe rotation.'
         Assert-Baseline $fixture
-        [pscustomobject]@{ fixture=$fixture.root; originalConfigurationExisted=$originalExisted; installedReferenceHash=$referenceHash; realSdkRegistrationUsed=$true; generatedDesktopSettingSimulated=(-not $originalExisted); pipeRotationAccepted=$true; originalExistenceAndBytesRestored=$true }
+        [pscustomobject]@{ fixture=$fixture.root; originalConfigurationExisted=$true; installedReferenceHash=$referenceHash; realSdkRegistrationUsed=$true; desktopSettingExistedBeforeInstallation=$true; pipeRotationAccepted=$true; originalExistenceAndBytesRestored=$true }
     }
+}
+Invoke-Case 'fresh SDK-generated Desktop baseline from empty configuration retains installed-reference pipe rotation support' {
+    $fixture = New-Fixture 'fresh-sdk-pipe'
+    [IO.File]::WriteAllBytes($fixture.configPath,[byte[]]@())
+    $emptyHash = Get-Hash $fixture.configPath
+    $pipeOne='11111111-1111-4111-8111-111111111111'
+    $pipeTwo='22222222-2222-4222-8222-222222222222'
+    $prepare = @'
+$ErrorActionPreference='Stop'
+[Console]::OutputEncoding=New-Object Text.UTF8Encoding($false)
+. TRUST_LITERAL
+$server=$null
+try {
+    $server=Start-SafeDeleteHookServer -CodexHome HOME_LITERAL -WorkingDirectory PROJECT_LITERAL
+    $null=Invoke-SafeDeleteHookRpc $server 'config/batchWrite' @{
+        edits=@(@{keyPath='mcp_servers.fixture';mergeStrategy='upsert';value=@{
+            command='cmd.exe';args=@('/d','/c','exit 0');enabled=$false
+            env=@{SKY_CUA_NATIVE_PIPE_DIRECTORY='\\.\pipe\codex-computer-use-11111111-1111-4111-8111-111111111111'}
+        }})
+    }
+} finally { Stop-SafeDeleteHookServer $server }
+Write-Output 'Desktop fixture baseline generated by actual local SDK before installation.'
+'@
+    foreach ($replacement in @(
+        @{token='TRUST_LITERAL';value=(Join-Path $SourceRoot 'hooks\Trust.ps1')},
+        @{token='HOME_LITERAL';value=$fixture.codexHome},
+        @{token='PROJECT_LITERAL';value=$fixture.project}
+    )) { $prepare=$prepare.Replace($replacement.token,"'" + $replacement.value.Replace("'","''") + "'") }
+    $helper=Join-Path $fixture.root 'prepare-desktop-config.ps1'
+    [IO.File]::WriteAllText($helper,$prepare,(New-Object Text.UTF8Encoding($true)))
+    $prepared=Invoke-Process @('-NoLogo','-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',$helper) $fixture
+    Assert-True ($prepared.exitCode -eq 0 -and (Get-Hash $fixture.configPath) -cne $emptyHash -and [IO.File]::ReadAllText($fixture.configPath).Contains($pipeOne)) 'Actual SDK did not generate the Desktop baseline before installation.'
+    $fixture.configBaseline=Get-Hash $fixture.configPath
+    $installed=Invoke-Install $fixture ''
+    Assert-True ($installed.exitCode -eq 0) 'Installation rejected its already prepared SDK-generated Desktop baseline.'
+    $reference=Assert-InstalledReference $fixture $true
+    $referenceHash=Get-Hash $reference
+    [IO.File]::WriteAllText($fixture.configPath,[IO.File]::ReadAllText($fixture.configPath).Replace($pipeOne,$pipeTwo),$encoding)
+    $uninstalled=Invoke-Uninstall $fixture ''
+    Assert-True ($uninstalled.exitCode -eq 0) 'Uninstall refused a verified pipe UUID rotation from an SDK-generated baseline.'
+    Assert-Baseline $fixture
+    [pscustomobject]@{fixture=$fixture.root;configurationWasEmptyBeforeSdkPreparation=$true;actualSdkGeneratedBaselineBeforeInstallation=$true;installedReferenceHash=$referenceHash;pipeRotationAccepted=$true;generatedBaselineRestoredByteForByte=$true}
 }
 foreach ($rotatePipe in @($false,$true)) {
     $label = if ($rotatePipe) { 'rotated-pipe' } else { 'unchanged-config' }
@@ -606,12 +712,21 @@ Invoke-Case 'failed migration restores the immediately preceding configuration a
         $null = [IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($target))
         [IO.File]::Copy((Join-Path $SourceRoot $relative),$target)
     }
-    [IO.File]::AppendAllText((Join-Path $sourceCopy 'src\InstallState.ps1'),"`r`nfunction Test-SafeDeleteHookCommand { throw 'Injected migration self-check failure.' }`r`n",$encoding)
+    $failureMarker=Join-Path $fixture.root 'injected-self-check-reached.json'
+    $fixture | Add-Member NoteProperty testEnvironment @{SAFEDELETE_TEST_FAILURE_MARKER=$failureMarker} -Force
+    $selfCheckFault=@'
+
+function Test-SafeDeleteHookCommand {
+    [IO.File]::WriteAllText($env:SAFEDELETE_TEST_FAILURE_MARKER,'{"injectedSelfCheckReached":true}',(New-Object Text.UTF8Encoding($false)))
+    throw 'Injected migration self-check failure.'
+}
+'@
+    [IO.File]::AppendAllText((Join-Path $sourceCopy 'src\InstallState.ps1'),$selfCheckFault,$encoding)
     $configBefore = Get-Hash $fixture.configPath
     $hooksBefore = Get-Hash $fixture.hooksPath
     $oldBefore = @(Get-Snapshot $fixture.legacy)
     $failed = Invoke-Install $fixture '' $sourceCopy
-    Assert-True ($failed.exitCode -ne 0 -and ($failed.stdout + $failed.stderr) -match 'Injected migration self-check failure') 'Migration did not reach its injected verification failure.'
+    Assert-True ($failed.exitCode -ne 0 -and [IO.File]::Exists($failureMarker)) 'Migration did not reach its injected verification failure.'
     Assert-True ((Get-Hash $fixture.configPath) -ceq $configBefore -and (Get-Hash $fixture.hooksPath) -ceq $hooksBefore) 'Failed migration did not restore the current config and hooks byte for byte.'
     Assert-Unchanged $fixture.legacy $oldBefore
     Assert-True ([string]::Equals([Environment]::GetEnvironmentVariable('Path','User'),$userPathBefore,[StringComparison]::Ordinal)) 'Migration rollback changed real User PATH.'
@@ -626,15 +741,154 @@ Invoke-Case 'failed migration restores the immediately preceding configuration a
     [pscustomobject]@{ fixture=$fixture.root; actualVerificationFailure=$true; configAndHooksRestored=$true; legacyFilesAndStateRestored=$true; userPathUnchanged=$true; rollbackFilesSafelyRemoved=$true }
 }
 
+foreach ($point in @('before-sdk-write','after-sdk-write','before-trust-return','after-self-check')) {
+    $pointDirectory = @{ 'before-sdk-write'='bsw'; 'after-sdk-write'='asw'; 'before-trust-return'='btr'; 'after-self-check'='asc' }[$point]
+    foreach ($failure in @($true,$false)) {
+        $branch = if ($failure) { 'later-self-check-failure' } else { 'no-forced-failure' }
+        $branchDirectory = if ($failure) { 'f' } else { 's' }
+        Invoke-Case ('Trust transaction concurrent configuration ' + $point + ' ' + $branch + ' preserves user bytes') {
+            $fixture = New-LegacyFixture ('tc-' + $pointDirectory + '-' + $branchDirectory) $false
+            $sourceCopy = New-TrustConcurrencySourceFixture ('src-tc-' + $pointDirectory + '-' + $branchDirectory)
+            Enable-TrustConcurrencyFault $fixture $point $failure
+            $configBefore = Get-Hash $fixture.configPath
+            $hooksBefore = Get-Hash $fixture.hooksPath
+            $legacyBefore = @(Get-Snapshot $fixture.legacy)
+            $migration = Invoke-Install $fixture '' $sourceCopy
+            $fault = Get-TrustConcurrencyEvidence $fixture
+            Assert-True ($null -ne $fault.injection -and $fault.injection.point -ceq $point) 'Migration never reached its requested concurrent-edit boundary.'
+            Assert-True ($fault.injection.rpcMocked -eq $false -and $fault.injection.actualLocalSdkCalled) 'Concurrency regression used a mocked SDK instead of the real local app-server.'
+            Assert-True ($migration.exitCode -ne 0) 'Migration accepted concurrent user configuration as its own write.'
+            $state = [IO.File]::ReadAllText((Join-Path $fixture.defaultInstall 'install-state.json')) | ConvertFrom-Json
+            Assert-True ($state.phase -ceq 'rolling-back') 'Concurrent configuration did not leave an inspectable unresolved rollback.'
+            Assert-True ($null -ne $fault.configWriteReceipt -and $fault.configWriteReceipt.publishedHash -match '^[0-9A-Fa-f]{64}$') 'Expected configuration ownership receipt was never published.'
+            $liveHash = Get-Hash $fixture.configPath
+            Assert-True ($liveHash -cne $fault.configWriteReceipt.publishedHash) 'The ownership receipt claimed the concurrent user bytes.'
+            $liveText = [IO.File]::ReadAllText($fixture.configPath)
+            Assert-True ($liveText.Contains('# concurrent-config-should-survive') -and $liveText.Contains('[profiles.safedelete_concurrency_regression]') -and $liveText -match 'model_reasoning_effort\s*=\s*[''\"]high[''\"]') 'Concurrent user profile settings or their comment were lost.'
+            $expectedLiveHash = $fault.injection.afterSha256
+            if ($point -ceq 'before-sdk-write' -and $null -ne $fault.sdkWriteSucceeded) { $expectedLiveHash=$fault.sdkWriteSucceeded.configSha256 }
+            Assert-True ($liveHash -ceq $expectedLiveHash) 'Rollback changed the last fixture bytes written by the user or SDK.'
+            if ($point -in @('before-trust-return','after-self-check')) {
+                Assert-True ($null -ne $fault.trustSucceeded -and $fault.trustSucceeded.enabled -and $fault.trustSucceeded.trustStatus -ceq 'trusted') 'Edit was not injected after successful actual SDK Trust.'
+            }
+            if ($point -ceq 'after-self-check') { Assert-True ($null -ne $fault.selfCheckSucceeded -and $fault.selfCheckSucceeded.actualHookExecuted) 'Edit did not occur after the actual Hook self-check.' }
+            Assert-True ((Get-Hash $fixture.hooksPath) -ceq $hooksBefore) 'Unresolved configuration rollback did not restore the unchanged legacy Hook file.'
+            Assert-Unchanged $fixture.legacy $legacyBefore
+            [IO.File]::WriteAllBytes((Join-Path $fault.directory 'config-after-migration.toml'),[IO.File]::ReadAllBytes($fixture.configPath))
+            $destinationBefore = @(Get-Snapshot $fixture.defaultInstall)
+            $uninstall = Invoke-Uninstall $fixture ''
+            Assert-True ($uninstall.exitCode -ne 0) 'Default uninstall accepted ownership of concurrently edited configuration.'
+            Assert-True ((Get-Hash $fixture.configPath) -ceq $liveHash -and (Get-Hash $fixture.hooksPath) -ceq $hooksBefore) 'Refused default uninstall changed concurrent configuration or the active legacy Hook.'
+            Assert-Unchanged $fixture.defaultInstall $destinationBefore
+            Assert-Unchanged $fixture.legacy $legacyBefore
+            [pscustomobject]@{
+                fixture=$fixture.root; point=$point; requestedLaterSelfCheckFailure=$failure; actualSdkBoundary=$true
+                safeMigrationRefusal=$true; unresolvedPhase=$state.phase; concurrentSettingsAndLastWriteBytesPreserved=$true
+                configBeforeSha256=$configBefore; retainedConfigSha256=$liveHash; expectedOwnedSha256=$fault.configWriteReceipt.publishedHash
+                defaultUninstallSafelyRefused=$true; legacyRuntimeAndHooksPreserved=$true; fault=$fault
+            }
+        }
+    }
+}
+
+foreach ($failure in @($true,$false)) {
+    $branch = if ($failure) { 'self-check-failure' } else { 'successful-migration' }
+    $branchDirectory = if ($failure) { 'f' } else { 's' }
+    Invoke-Case ('Trust transaction normal SDK-only write ' + $branch + ' restores the correct baseline') {
+        $fixture = New-LegacyFixture ('tn-' + $branchDirectory) $false $true '' $true
+        $sourceCopy = New-TrustConcurrencySourceFixture ('src-tn-' + $branchDirectory)
+        Enable-TrustConcurrencyFault $fixture 'none' $failure
+        $configBefore = Get-Hash $fixture.configPath
+        $hooksBefore = Get-Hash $fixture.hooksPath
+        $legacyBefore = @(Get-Snapshot $fixture.legacy)
+        $migration = Invoke-Install $fixture '' $sourceCopy
+        $fault = Get-TrustConcurrencyEvidence $fixture
+        Assert-True ($null -eq $fault.injection -and $null -ne $fault.sdkWriteSucceeded -and $null -ne $fault.trustSucceeded) 'Normal control did not execute a real SDK-only Trust write.'
+        Assert-True ($null -ne $fault.configWriteReceipt -and $fault.configWriteReceipt.publishedHash -ceq $fault.sdkWriteSucceeded.configSha256 -and $fault.trustSucceeded.configWriteHash -ceq $fault.sdkWriteSucceeded.configSha256) 'Normal SDK bytes do not match the prepublished ownership receipt and Trust return.'
+        Assert-True ($null -ne $fault.selfCheckSucceeded -and $fault.selfCheckSucceeded.actualHookExecuted) 'Normal control did not execute the real configured Hook.'
+        $state = [IO.File]::ReadAllText((Join-Path $fixture.defaultInstall 'install-state.json')) | ConvertFrom-Json
+        if ($failure) {
+            Assert-True ($migration.exitCode -ne 0 -and $state.phase -ceq 'rolled-back') 'SDK-only self-check failure did not complete rollback.'
+            Assert-True ((Get-Hash $fixture.configPath) -ceq $configBefore -and (Get-Hash $fixture.hooksPath) -ceq $hooksBefore) 'SDK-only rollback failed to restore the immediately preceding configuration bytes.'
+            Assert-Unchanged $fixture.legacy $legacyBefore
+        } else {
+            Assert-True ($migration.exitCode -eq 0) 'Valid SDK-only configuration changes were incorrectly treated as concurrent edits.'
+            $null = Assert-Migrated $fixture
+        }
+        $uninstall = Invoke-Uninstall $fixture ''
+        Assert-True ($uninstall.exitCode -eq 0 -and -not (Test-Path -LiteralPath $fixture.defaultInstall)) 'Normal SDK-only transaction could not safely uninstall its destination.'
+        if ($failure) {
+            Assert-True ((Get-Hash $fixture.configPath) -ceq $configBefore -and (Get-Hash $fixture.hooksPath) -ceq $hooksBefore) 'Rollback cleanup changed the active legacy configuration.'
+            Assert-Unchanged $fixture.legacy $legacyBefore
+        } else { Assert-Baseline $fixture }
+        [pscustomobject]@{fixture=$fixture.root;actualLocalSdkWrite=$true;actualHookExecuted=$true;expectedReceiptVerified=$true;selfCheckFailureInjected=$failure;configurationBaselineRestored=$true;destinationSafelyRemoved=$true;fault=$fault}
+    }
+}
+
+foreach ($reloadFailure in @('failure','timeout')) {
+    $failureDirectory = if ($reloadFailure -ceq 'failure') { 'f' } else { 't' }
+    Invoke-Case ('Trust transaction SDK reload ' + $reloadFailure + ' after actual write rolls back from its receipt') {
+        $fixture = New-LegacyFixture ('tr-' + $failureDirectory) $false
+        $sourceCopy = New-TrustConcurrencySourceFixture ('src-tr-' + $failureDirectory)
+        Enable-TrustConcurrencyFault $fixture 'none' $false $reloadFailure
+        $configBefore = Get-Hash $fixture.configPath
+        $hooksBefore = Get-Hash $fixture.hooksPath
+        $legacyBefore = @(Get-Snapshot $fixture.legacy)
+        $migration = Invoke-Install $fixture '' $sourceCopy
+        $fault = Get-TrustConcurrencyEvidence $fixture
+        Assert-True ($null -ne $fault.sdkWriteSucceeded -and $null -ne $fault.sdkReloadFailed -and $fault.sdkReloadFailed.mode -ceq $reloadFailure) 'Fault was not injected at reload after the actual successful SDK write.'
+        Assert-True ($null -eq $fault.trustSucceeded -and $null -eq $fault.selfCheckSucceeded -and $null -eq $fault.injection) 'Reload failure unexpectedly returned a trusted Hook or ran later self-checks.'
+        Assert-True ($null -ne $fault.configWriteReceipt -and $fault.configWriteReceipt.publishedHash -ceq $fault.sdkWriteSucceeded.configSha256) 'SDK failure discarded the receipt of bytes already written.'
+        $state = [IO.File]::ReadAllText((Join-Path $fixture.defaultInstall 'install-state.json')) | ConvertFrom-Json
+        Assert-True ($migration.exitCode -ne 0 -and $state.phase -ceq 'rolled-back') 'SDK reload failure could not roll back its owned write.'
+        Assert-True ((Get-Hash $fixture.configPath) -ceq $configBefore -and (Get-Hash $fixture.hooksPath) -ceq $hooksBefore) 'Receipt rollback did not restore the pre-migration configuration bytes.'
+        Assert-Unchanged $fixture.legacy $legacyBefore
+        $uninstall = Invoke-Uninstall $fixture ''
+        Assert-True ($uninstall.exitCode -eq 0 -and -not (Test-Path -LiteralPath $fixture.defaultInstall)) 'Receipt rollback destination could not be safely cleaned up.'
+        Assert-True ((Get-Hash $fixture.configPath) -ceq $configBefore -and (Get-Hash $fixture.hooksPath) -ceq $hooksBefore) 'Receipt rollback cleanup overwrote the restored configuration.'
+        Assert-Unchanged $fixture.legacy $legacyBefore
+        [pscustomobject]@{fixture=$fixture.root;reloadFault=$reloadFailure;timeoutExceptionInjected=($reloadFailure -ceq 'timeout');actualSdkWriteBeforeFailure=$true;prepublishedReceiptSurvivedFailure=$true;configurationBytesRestored=$true;legacyRuntimePreserved=$true;destinationSafelyRemoved=$true;fault=$fault}
+    }
+}
+
+foreach ($configuration in @('absent','empty')) {
+    $configurationDirectory = if ($configuration -ceq 'absent') { 'a' } else { 'e' }
+    Invoke-Case ('Trust transaction fresh ' + $configuration + ' configuration installs and restores its original existence') {
+        $fixture = New-Fixture ('tf-' + $configurationDirectory)
+        if ($configuration -ceq 'absent') {
+            $absolute = [IO.Path]::GetFullPath($fixture.configPath)
+            Assert-True ($absolute.StartsWith($runRoot + '\',[StringComparison]::OrdinalIgnoreCase)) 'Absent configuration fixture escaped its run directory.'
+            Remove-Item -LiteralPath $absolute -Force
+            $fixture.configBaseline=$null
+        } else {
+            [IO.File]::WriteAllBytes($fixture.configPath,[byte[]]@())
+            $fixture.configBaseline=Get-Hash $fixture.configPath
+        }
+        $sourceCopy = New-TrustConcurrencySourceFixture ('src-tf-' + $configurationDirectory)
+        Enable-TrustConcurrencyFault $fixture 'none' $false
+        $installed = Invoke-Install $fixture '' $sourceCopy
+        Assert-True ($installed.exitCode -eq 0) 'Fresh installation failed its absent or empty baseline ownership check.'
+        $null = Assert-InstalledReference $fixture ($configuration -ceq 'empty')
+        $fault = Get-TrustConcurrencyEvidence $fixture
+        Assert-True ($null -eq $fault.injection -and $null -ne $fault.sdkWriteSucceeded -and $null -ne $fault.trustSucceeded) 'Fresh control did not execute its actual SDK Trust write.'
+        Assert-True ($null -ne $fault.configWriteReceipt -and $fault.configWriteReceipt.publishedHash -ceq $fault.sdkWriteSucceeded.configSha256 -and $fault.trustSucceeded.configWriteHash -ceq $fault.sdkWriteSucceeded.configSha256) 'Fresh SDK bytes do not match their published ownership receipt.'
+        $uninstalled = Invoke-Uninstall $fixture ''
+        Assert-True ($uninstalled.exitCode -eq 0 -and -not (Test-Path -LiteralPath $fixture.defaultInstall)) 'Fresh absent/empty installation could not safely uninstall.'
+        Assert-Baseline $fixture
+        [pscustomobject]@{fixture=$fixture.root;originalConfiguration=$configuration;actualLocalSdkCalled=$true;ownershipReceiptVerified=$true;originalConfigurationExistenceAndBytesRestored=$true;fault=$fault}
+    }
+}
+
 $sourceUnchanged = $true
 foreach ($entry in $sourceHashes) { if ((Get-Hash (Join-Path $SourceRoot $entry.path)) -cne $entry.hash) { $sourceUnchanged=$false } }
 $pathUnchanged = [string]::Equals([Environment]::GetEnvironmentVariable('Path','User'),$userPathBefore,[StringComparison]::Ordinal) -and [string]::Equals($env:Path,$processPathBefore,[StringComparison]::Ordinal)
 $failedCount = @($results | Where-Object { $_.result -eq 'FAIL' }).Count
 if (-not $sourceUnchanged -or -not $pathUnchanged) { $failedCount++ }
+if ($results.Count -eq 0) { $failedCount++ }
 $reportPath = Join-Path $runRoot 'report.json'
 $report = [pscustomobject]@{
     result=$(if ($failedCount -eq 0) { 'PASS' } else { 'FAIL' }); runtime=$PSVersionTable.PSVersion.ToString(); childShell=$ShellPath
-    tested_at=[DateTime]::UtcNow.ToString('o'); total=$results.Count; passed=@($results | Where-Object { $_.result -eq 'PASS' }).Count; failed=$failedCount
+    tested_at=[DateTime]::UtcNow.ToString('o'); total=$results.Count; passed=@($results | Where-Object { $_.result -eq 'PASS' }).Count; failed=$failedCount; caseFilter=$CaseFilter
     sourceUnchanged=$sourceUnchanged; userAndParentProcessPathUnchanged=$pathUnchanged; sourceHashes=$sourceHashes; tests=@($results.ToArray()); fixtures=$runRoot
     platformEvidence='Synthetic logical AppData and package LocalCache fixtures; no physical MSIX or alternate Windows host claim.'
     snapshotExclusions=@('AppData/Local/Microsoft/Windows/PowerShell/StartupProfileData-NonInteractive','AppData/Local/Microsoft/PowerShell/StartupProfileData-NonInteractive')

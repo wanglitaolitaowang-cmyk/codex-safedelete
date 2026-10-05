@@ -24,36 +24,96 @@ $script:mockListings = @()
 $script:listingIndex = 0
 $script:starts = 0
 $script:stops = 0
+$script:previewWrites = New-Object 'System.Collections.Generic.List[object]'
+$script:mockMode = ''
+$script:receipt = @{}
+$script:receiptAtRealWrite = $null
+$configPath = Join-Path $codexHome 'config.toml'
+$fixtureEncoding = New-Object Text.UTF8Encoding($false)
+$baselineConfig = "# unrelated fixture comment`r`nmodel = 'hook-protocol-fixture'`r`n"
+foreach ($directory in @($codexHome,$project,$foreignProject)) { [void][IO.Directory]::CreateDirectory($directory) }
+
+function Get-TestBytesHash {
+    param([byte[]]$Bytes)
+    $sha = [Security.Cryptography.SHA256]::Create()
+    try { return [BitConverter]::ToString($sha.ComputeHash($Bytes)).Replace('-','') }
+    finally { $sha.Dispose() }
+}
+
+function Get-TestFileHash {
+    param([string]$Path = $configPath)
+    return Get-TestBytesHash ([IO.File]::ReadAllBytes($Path))
+}
+
+function Get-MockSdkConfigBytes {
+    param([byte[]]$Baseline, [object[]]$Edits)
+    Assert-True ($Edits.Count -eq 2 -and $Edits[0].keyPath -ceq 'features.hooks' -and $Edits[1].keyPath -ceq 'hooks.state') 'Mock SDK received different configuration edits.'
+    Assert-True ($Edits[0].value -is [bool] -and $Edits[0].value -and $Edits[0].mergeStrategy -ceq 'upsert') 'Mock SDK feature edit differs.'
+    $trust = $Edits[1].value
+    Assert-True ($trust.Count -eq 1 -and $trust.ContainsKey($key) -and $trust[$key].trusted_hash -ceq $hash -and $Edits[1].mergeStrategy -ceq 'upsert') 'Mock SDK trust edit differs.'
+    # Both servers independently apply the same deterministic SDK edit to their
+    # own baseline bytes. The expected output never derives from actual live hash.
+    $suffix = "`r`n[features]`r`nhooks = true`r`n[hooks.state." + (ConvertTo-Json -InputObject $key -Compress) + "]`r`ntrusted_hash = " + (ConvertTo-Json -InputObject $hash -Compress) + "`r`n"
+    return [byte[]]@($Baseline + $fixtureEncoding.GetBytes($suffix))
+}
 
 . (Join-Path $SourceRoot 'hooks\Trust.ps1')
 
-# These replacements never start Codex or write a real configuration. Exercise
-# the registration entry point and record exactly which RPC edits it requested.
+# These replacements never start Codex or write a user's configuration. Both
+# actual and preview servers operate on independent fixture configuration files.
 function Start-SafeDeleteHookServer {
     param([string]$CodexHome, [string]$WorkingDirectory, [switch]$EnableHooks)
     $script:starts++
-    return [pscustomobject]@{ number=$script:starts; enableHooks=[bool]$EnableHooks }
+    $actual = [string]::Equals([IO.Path]::GetFullPath($CodexHome),[IO.Path]::GetFullPath($script:codexHome),[StringComparison]::OrdinalIgnoreCase)
+    if (-not $actual -and $script:mockMode -ceq 'preview-startup-comment') {
+        [IO.File]::AppendAllText((Join-Path $CodexHome 'config.toml'),"# preview startup changed baseline`r`n",$fixtureEncoding)
+    }
+    return [pscustomobject]@{ number=$script:starts; enableHooks=[bool]$EnableHooks; actual=$actual; codexHome=$CodexHome; stopped=$false }
 }
 
 function Invoke-SafeDeleteHookRpc {
     param($Server, [string]$Method, [hashtable]$Params)
     if ($Method -ceq 'hooks/list') {
+        Assert-True $Server.actual 'Preview server must not discover hooks.'
         if (@($Params.cwds).Count -ne 1 -or $Params.cwds[0] -cne $project) { throw 'Unexpected requested cwd in mock RPC.' }
+        if ($script:mockMode -ceq 'reload-rpc-failure' -and $script:listingIndex -ge 1) { throw 'Injected reload RPC failure after config write.' }
         if ($script:listingIndex -ge $script:mockListings.Count) { throw 'Mock hooks/list queue exhausted.' }
         $listing = $script:mockListings[$script:listingIndex]
         $script:listingIndex++
+        if ($script:listingIndex -gt 1) {
+            if ($script:mockMode -ceq 'reload-user-marker') { [IO.File]::AppendAllText($script:configPath,"concurrent_user_note = 'must-survive'`r`n",$fixtureEncoding) }
+            if ($script:mockMode -ceq 'reload-user-comment') { [IO.File]::AppendAllText($script:configPath,"# concurrent user comment must survive`r`n",$fixtureEncoding) }
+        }
         return $listing
     }
     if ($Method -ceq 'config/batchWrite') {
-        $script:rpcWrites.Add($Params)
-        return [pscustomobject]@{}
+        $serverConfig = Join-Path $Server.codexHome 'config.toml'
+        Assert-True ([string]::Equals([IO.Path]::GetFullPath($Params.filePath),[IO.Path]::GetFullPath($serverConfig),[StringComparison]::OrdinalIgnoreCase)) 'RPC filePath must target its own CODEX_HOME config.toml.'
+        if ($Server.actual) {
+            $script:rpcWrites.Add($Params)
+            $script:receiptAtRealWrite = $script:receipt.Hash
+        } else {
+            Assert-True ([IO.File]::ReadAllText($serverConfig) -ceq $baselineConfig) 'Preview did not receive the independently saved baseline.'
+            $script:previewWrites.Add($Params)
+            if ($script:mockMode -ceq 'preview-rpc-failure') { throw 'Injected preview RPC failure before real write.' }
+        }
+        $writeBytes = Get-MockSdkConfigBytes ([IO.File]::ReadAllBytes($serverConfig)) @($Params.edits)
+        [IO.File]::WriteAllBytes($serverConfig,$writeBytes)
+        if ($Server.actual) {
+            if ($script:mockMode -ceq 'write-then-rpc-failure') { throw 'Injected real RPC failure after config write.' }
+            if ($script:mockMode -ceq 'post-write-user-marker') { [IO.File]::AppendAllText($serverConfig,"concurrent_user_note = 'must-survive'`r`n",$fixtureEncoding) }
+            if ($script:mockMode -ceq 'post-write-user-comment') { [IO.File]::AppendAllText($serverConfig,"# concurrent user comment must survive`r`n",$fixtureEncoding) }
+        } elseif ($script:mockMode -ceq 'before-real-write-comment') {
+            [IO.File]::AppendAllText($script:configPath,"# user comment after preview must survive`r`n",$fixtureEncoding)
+        }
+        return [pscustomobject]@{status='ok';version=('sha256:' + ('c' * 64));filePath=$serverConfig;overriddenMetadata=$null}
     }
     throw ('Unexpected RPC method: ' + $Method)
 }
 
 function Stop-SafeDeleteHookServer {
     param($Server)
-    if ($null -ne $Server) { $script:stops++ }
+    if ($null -ne $Server -and -not $Server.stopped) { $script:stops++; $Server.stopped=$true }
 }
 
 function Assert-True {
@@ -91,11 +151,18 @@ function Set-MockListing {
     $script:rpcWrites.Clear()
     $script:starts = 0
     $script:stops = 0
+    $script:previewWrites.Clear()
+    $script:mockMode = ''
+    $script:receipt = @{}
+    $script:receiptAtRealWrite = $null
+    [IO.File]::WriteAllText($configPath,$baselineConfig,$fixtureEncoding)
 }
 
 function Get-TestRegistration {
-    param([switch]$Trust)
-    return Get-SafeDeleteHookRegistration -CodexHome $codexHome -WorkingDirectory $project -HookPath $hookPath -ExpectedCommand $expectedCommand -Trust:$Trust
+    param([switch]$Trust, [string]$ExpectedConfigHash)
+    $parameters = @{CodexHome=$codexHome;WorkingDirectory=$project;HookPath=$hookPath;ExpectedCommand=$expectedCommand;Trust=$Trust;ConfigWriteReceipt=$script:receipt}
+    if ($PSBoundParameters.ContainsKey('ExpectedConfigHash')) { $parameters.ExpectedConfigHash=$ExpectedConfigHash }
+    return Get-SafeDeleteHookRegistration @parameters
 }
 
 function Assert-Rejected {
@@ -331,6 +398,76 @@ Test-Case 'Reload foreign cwd cannot confirm trust' {
 Test-Case 'Reload still untrusted rejects without a second write' {
     Set-MockListing (New-TestListing @((New-TestHook @{trustStatus='untrusted'}))) (New-TestListing @((New-TestHook @{trustStatus='untrusted'})))
     $null = Assert-Rejected -ExpectedWrites 1 -MessagePattern 'did not confirm the same'
+}
+
+Test-Case 'Trust previews saved baseline independently and publishes its byte hash before real write' {
+    Set-MockListing (New-TestListing @((New-TestHook @{trustStatus='untrusted'}))) (New-TestListing @((New-TestHook)))
+    $baselineHash = Get-TestBytesHash ($fixtureEncoding.GetBytes($baselineConfig))
+    $registration = Get-TestRegistration -Trust -ExpectedConfigHash $baselineHash
+    Assert-True ($script:previewWrites.Count -eq 1 -and $script:rpcWrites.Count -eq 1) 'Trust did not perform one independent preview and one real write.'
+    $expectedBytes = Get-MockSdkConfigBytes ($fixtureEncoding.GetBytes($baselineConfig)) @($script:rpcWrites[0].edits)
+    $expectedHash = Get-TestBytesHash $expectedBytes
+    Assert-True ($registration.ConfigWriteHash -ceq $expectedHash -and $script:receipt.Hash -ceq $expectedHash) 'Trust did not return the independent expected byte hash.'
+    Assert-True ($script:receiptAtRealWrite -ceq $expectedHash) 'Expected-byte receipt was published after the real write started.'
+    Assert-True ((Get-TestFileHash) -ceq $expectedHash -and $expectedHash -cne ('c' * 64)) 'Trust confused semantic RPC version with the configuration byte hash.'
+    Assert-True ($script:starts -eq $script:stops) 'Normal preview/trust leaked a server.'
+}
+
+Test-Case 'Preview RPC failure leaves real configuration and write receipt untouched' {
+    Set-MockListing (New-TestListing @((New-TestHook @{trustStatus='untrusted'}))) (New-TestListing @((New-TestHook)))
+    $script:mockMode = 'preview-rpc-failure'
+    $baselineHash = Get-TestFileHash
+    $null = Assert-Rejected -MessagePattern 'preview RPC failure'
+    Assert-True ($script:previewWrites.Count -eq 1 -and (Get-TestFileHash) -ceq $baselineHash) 'Preview failure wrote the real configuration.'
+    Assert-True (-not ($script:receipt.ContainsKey('Hash') -and $script:receipt.Hash)) 'Preview failure published unproved ownership.'
+}
+
+Test-Case 'Preview startup baseline changes reject before any configuration RPC write' {
+    Set-MockListing (New-TestListing @((New-TestHook @{trustStatus='untrusted'}))) (New-TestListing @((New-TestHook)))
+    $script:mockMode = 'preview-startup-comment'
+    $baselineHash = Get-TestFileHash
+    $null = Assert-Rejected
+    Assert-True ($script:previewWrites.Count -eq 0 -and (Get-TestFileHash) -ceq $baselineHash) 'Changed scratch baseline was silently trusted or copied into real config.'
+}
+
+Test-Case 'Caller snapshot mismatch rejects before preview and real writes' {
+    Set-MockListing (New-TestListing @((New-TestHook @{trustStatus='untrusted'}))) (New-TestListing @((New-TestHook)))
+    $baselineHash = Get-TestFileHash
+    $message = $null
+    try { $null = Get-TestRegistration -Trust -ExpectedConfigHash ('d' * 64) } catch { $message = $_.Exception.Message }
+    Assert-True ($null -ne $message -and $script:rpcWrites.Count -eq 0 -and $script:previewWrites.Count -eq 0) 'Caller snapshot mismatch did not stop ownership preparation.'
+    Assert-True ((Get-TestFileHash) -ceq $baselineHash -and $script:starts -eq $script:stops) 'Snapshot mismatch changed config or leaked a server.'
+}
+
+Test-Case 'Comment concurrent with preview is preserved and rejects before real write' {
+    Set-MockListing (New-TestListing @((New-TestHook @{trustStatus='untrusted'}))) (New-TestListing @((New-TestHook)))
+    $script:mockMode = 'before-real-write-comment'
+    $null = Assert-Rejected
+    Assert-True ($script:previewWrites.Count -eq 1 -and [IO.File]::ReadAllText($configPath) -ceq ($baselineConfig + "# user comment after preview must survive`r`n")) 'Pre-write concurrent comment was overwritten.'
+}
+
+foreach ($mode in @('post-write-user-marker','post-write-user-comment','reload-user-marker','reload-user-comment')) {
+    Test-Case ('Concurrent ' + $mode + ' cannot become owned configuration') {
+        Set-MockListing (New-TestListing @((New-TestHook @{trustStatus='untrusted'}))) (New-TestListing @((New-TestHook)))
+        $script:mockMode = $mode
+        $null = Assert-Rejected -ExpectedWrites 1
+        $expectedBytes = Get-MockSdkConfigBytes ($fixtureEncoding.GetBytes($baselineConfig)) @($script:rpcWrites[0].edits)
+        $expectedHash = Get-TestBytesHash $expectedBytes
+        $marker = if ($mode.EndsWith('marker')) { "concurrent_user_note = 'must-survive'`r`n" } else { "# concurrent user comment must survive`r`n" }
+        Assert-True ([IO.File]::ReadAllText($configPath) -ceq ($fixtureEncoding.GetString($expectedBytes) + $marker)) 'Unowned concurrent configuration bytes were overwritten.'
+        Assert-True ($script:receipt.Hash -ceq $expectedHash -and $script:receiptAtRealWrite -ceq $expectedHash -and (Get-TestFileHash) -cne $expectedHash) 'Receipt adopted concurrent live configuration hash.'
+    }
+}
+
+foreach ($kind in @('write-then-rpc-failure','reload-rpc-failure')) {
+    Test-Case ('Independent ownership receipt survives ' + $kind) {
+        Set-MockListing (New-TestListing @((New-TestHook @{trustStatus='untrusted'}))) (New-TestListing @((New-TestHook)))
+        $script:mockMode = $kind
+        $null = Assert-Rejected -ExpectedWrites 1 -MessagePattern 'Injected'
+        $expectedBytes = Get-MockSdkConfigBytes ($fixtureEncoding.GetBytes($baselineConfig)) @($script:rpcWrites[0].edits)
+        $expectedHash = Get-TestBytesHash $expectedBytes
+        Assert-True ($script:receipt.Hash -ceq $expectedHash -and $script:receiptAtRealWrite -ceq $expectedHash -and (Get-TestFileHash) -ceq $expectedHash) 'Proved SDK write cannot be identified by caller rollback after RPC/reload failure.'
+    }
 }
 
 $sourceHashes = @()

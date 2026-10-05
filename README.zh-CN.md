@@ -93,8 +93,11 @@ safedelete undo
 | Windows 7 / 8，或 Windows 10 1809 之前的版本 | 不支持 Codex 集成；安装会在修改配置前退出 |
 | Linux / macOS | 尚未提供安装入口和平台适配；当前版本不支持 |
 
-Desktop 的完整退出与重启来自此前实测；本轮 MVP 修复没有重复完整 GUI 重启流程。
-各轮验证和失败记录见 [TEST-RESULTS.md](TEST-RESULTS.md)。
+2026-10-05 修复版已通过实际升级、默认卸载回装，以及用户确认完整重启 Desktop 后的
+删除拦截、按 ID 恢复和 patch 删除拒绝。安装或升级后请重开 Codex 和终端；
+仍在运行的旧聊天在安装后的首次删除没有被拦截。
+本轮范围和保留的失败记录见 [验证说明](VERIFICATION-20261005.md) 与
+[TEST-RESULTS.md](TEST-RESULTS.md)。
 
 安装要求 Windows 10 1809（build 17763）或更新版本，以及 PowerShell 5.1 或更新版本。
 系统边界依据 [Codex 官方 Windows 说明](https://developers.openai.com/codex/windows)：
