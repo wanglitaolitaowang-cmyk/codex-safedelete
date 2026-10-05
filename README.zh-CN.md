@@ -14,15 +14,26 @@ Windows 上 Codex 的本地删除保护，误删后一条命令恢复。
 
 ### 安装
 
-双击：
+需要 Windows 10 1809 或更新版本、PowerShell 5.1 或更新版本，以及本地
+`codex.exe`（Codex Desktop 自带）。实际验证环境为 Windows 11，
+详见[兼容性与验证](#兼容性与验证)。
 
-```text
-Install SafeDelete.cmd
+1. 在本仓库的 GitHub 页面选择 **Code → Download ZIP**。
+   [GitHub 下载说明](https://docs.github.com/en/repositories/working-with-files/using-files/downloading-source-code-archives)
+2. 完整解压 ZIP，进入解压后的项目目录。
+3. 双击 **`Install SafeDelete.cmd`**，等待安装成功。
+4. **彻底退出 Codex 后重新启动**，再打开新的 Windows PowerShell 终端，检查：
+
+```powershell
+safedelete status
 ```
 
-重新打开 Codex 和终端一次，即可正常使用。
+结果应为 `ON`。安装不会刷新已经运行的聊天；在同一个运行中的应用里新建聊天，
+不等于完整重启。已有旧版请按[升级步骤](#升级已有安装)处理。
 
 ### 误删了？
+
+在发生删除的原项目目录打开 Windows PowerShell，再运行：
 
 ```powershell
 safedelete undo
@@ -59,16 +70,53 @@ safedelete status
 
 `ON` 表示本地 Hook 已注册、启用、受信任且通过验证。
 `OFF` 表示保护已暂停。`UNKNOWN` 表示配置需要处理；命令会返回错误，不会声称保护已启用。
+这是本地注册和 Hook 执行检查，不证明已经运行的聊天加载了配置。
+安装或升级后仍须完整重启 Codex。
+
+## 升级已有安装
+
+重复安装只验证已有程序，不会升级文件。若新旧程序文件不同，安装会退出并保留现有安装。
+
+1. 使用**原版本项目目录**里的 **`Uninstall SafeDelete.cmd`** 卸载。
+   若提示配置冲突，查看[卸载说明](#卸载)。
+2. 彻底退出 Codex 后重新启动，并打开新终端。
+3. 下载并完整解压新版本，双击新目录中的 **`Install SafeDelete.cmd`**。
+4. 安装成功后，再次彻底退出 Codex 后重新启动，打开新终端，
+   执行 `safedelete status` 确认 `ON`。
+
+卸载和升级会保留项目中已保存的文件及恢复历史。
 
 ## 卸载
 
 双击 **`Uninstall SafeDelete.cmd`**。
 
-卸载完成后重新打开 Codex 和终端，清除正在运行的旧 Hook 和 PATH。
+卸载完成后彻底退出 Codex 后重新启动，并打开新终端，清除正在运行的旧 Hook、刷新 PATH。
 
 暂停只临时关闭保护，SafeDelete 仍然安装。
-卸载会移除 SafeDelete，并恢复原 Codex 配置和 PATH。
+卸载会移除 SafeDelete，恢复原 Codex 配置及安装程序改动的 PATH。
+若安装后改过配置或 PATH，卸载会先停止，并提示检查备份。
 两者都保留项目中已保存的文件和恢复记录。
+
+<details>
+<summary>卸载细节</summary>
+
+也可以在原版本项目目录用 PowerShell 卸载：
+
+```powershell
+.\uninstall.ps1
+```
+
+请用双击入口或独立 PowerShell 终端安装、卸载。
+Hook 会拒绝代理调用的不透明脚本。
+
+安装会保留已有 Hook，并逐字节备份原 Codex 配置。
+完整安装后的卸载恢复原配置，并还原安装程序记录的 PATH 修改；项目内的恢复文件保留。
+若用户后来修改了配置或 PATH，卸载会停止，避免覆盖，并提供备份位置。
+若安装已完整回滚，卸载只清理残留安装文件，保留当前配置和 PATH。
+Desktop 的临时 `codex-computer-use` 命名管道 GUID 变化，仅在内存回填该值后，
+整份配置哈希与已安装配置完全匹配时接受；其他配置或 PATH 变化仍会阻止卸载。
+
+</details>
 
 ```text
 Codex 尝试删除：
@@ -81,8 +129,9 @@ safedelete undo
 → src/ 已恢复
 ```
 
-**Windows 本地 MVP。** 不上传文件、无服务器、无需账号、无后台服务。
-采用 MIT 许可证。
+## 兼容性与验证
+
+**Windows 本地 MVP／预览版。** 采用 MIT 许可证。
 
 | 环境 | 实际验证 |
 | --- | --- |
@@ -100,7 +149,7 @@ safedelete undo
 [TEST-RESULTS.md](TEST-RESULTS.md)。
 
 安装要求 Windows 10 1809（build 17763）或更新版本，以及 PowerShell 5.1 或更新版本。
-系统边界依据 [Codex 官方 Windows 说明](https://developers.openai.com/codex/windows)：
+系统边界依据 [Codex 官方 Windows 说明](https://learn.chatgpt.com/docs/windows/windows-sandbox)：
 推荐 Windows 11，Windows 10 属于尽力支持范围。
 
 暂停与恢复、Desktop 完全重启后的状态持久化、旧记录恢复和默认卸载也已验证。
@@ -108,6 +157,10 @@ safedelete undo
 尚未证明默认兼容 360 或其他杀毒软件。Hook 若被安全软件阻止，就无法保护删除。
 请先审阅脚本和提示，再决定是否允许运行；安装程序不会修改杀毒软件设置或添加排除项。
 自检使用可读命令。
+
+## 安装说明与故障处理
+
+### 安装检查与重试
 
 双击入口使用 Windows PowerShell 5.1，无需管理员权限，并保留结果窗口。
 执行策略绕过仅用于本次进程，不改变已保存的执行策略。
@@ -117,15 +170,15 @@ safedelete undo
 再双击 `Install SafeDelete.cmd` 重试。清理会保留回滚后对配置和 PATH 的修改。
 若回滚未完成，先检查错误及保留的配置备份，再处理重试。
 
+### 安装位置与旧版迁移
+
 默认程序目录是 `%USERPROFILE%\.codex-safedelete-app`，资源管理器和 Codex 都能访问。
 旧 AppData 目录可能被 MSIX 桌面应用重定向到包缓存，导致双击安装时只看到 Hook 注册。
 安装会备份并迁移可验证的旧默认安装，保留原配置备份、暂停状态和项目恢复记录。
 迁移后暂停、恢复和状态检查会同时验证仍存在的旧缓存 Hook，保证重启前开关一致。
 多个旧安装、配置冲突或缺少有效状态时会保留文件并提示处理，不会盲删注册。
 
-共享目录中的重复安装只验证已有程序，不会升级文件。若新旧程序文件不同，安装会退出，
-并保留现有安装。请先使用原版本的 `Uninstall SafeDelete.cmd` 卸载，
-重新打开 Codex 和终端后再安装新版本；项目中的回收站和历史记录会保留。
+### 已有安装或配置冲突
 
 同一 Windows 用户不能同时对相同安装目录或 Codex 配置执行安装、卸载。
 若另一个操作正在占用，本次操作会退出且不做修改；等它完成后再重试。
@@ -133,6 +186,8 @@ safedelete undo
 若已有 SafeDelete 注册但缺少对应安装状态，安装会在修改文件前退出，避免再添加一份 Hook。
 验证会合并同一 key 的完全相同报告；不同注册或相互冲突的记录会报错，并显示来源和 key。
 已有安装请使用原卸载程序处理；状态缺失或不完整时，请保留错误和配置备份再检查。
+
+### 用 PowerShell 安装
 
 高级用户可在解压后的项目目录用 PowerShell 安装：
 
@@ -149,10 +204,12 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1
 重新打开 Codex 和终端。在 Codex `/hooks` 中确认 SafeDelete 已启用并受信任。
 安装程序通过本地 Codex app-server 验证注册；版本不支持时会报错并回滚。
 
+## 恢复命令与文件保存
+
 在发生删除的项目目录运行：
 
 ```powershell
-safedelete undo           # 恢复最近一次删除
+safedelete undo           # 恢复当前项目最近一条可恢复删除
 safedelete list           # 查看记录与原路径
 safedelete restore <id>   # 恢复指定记录
 safedelete delete src/    # 主动安全删除
@@ -165,12 +222,18 @@ safedelete delete src/    # 主动安全删除
 删除和恢复会读取内容生成本地校验值，以便安全核对中断记录；大文件可能耗时更长。
 旧版中断记录可能缺少这些校验信息，需要核对后手工恢复，剩余保存区文件仍会保留。
 
+## 保护行为与范围
+
+### 暂停状态
+
 暂停开关对整套安装生效，重启 Codex 后仍保留。
 它只修改安装目录中的 `protection-state.json`，不修改 Codex 配置或 PATH。
 Hook 每次调用都会读取状态。OFF 时 `list`、`undo`、`restore` 和主动执行的 `safedelete delete`
 仍可使用。状态文件缺失时保持保护；文件损坏时拒绝命令。
 只有在确实想停止保护时才暂停；代理不得用暂停绕过被拒绝的删除。
 暂停功能出现前安装的旧版，需要先用原卸载程序卸载；安装程序不会静默覆盖。
+
+### 支持的删除命令
 
 自动恢复支持 PowerShell 的字面量删除命令。默认 Windows Shell 下请使用 `Remove-Item`。
 `rm`、`del`、`erase`、`rmdir`、`rd` 等歧义别名需要明确的 PowerShell Shell 信息，
@@ -193,6 +256,8 @@ Hook 检查失败或超过 20 秒预算时会明确拒绝原命令，避免慢�
 明确的 `apply_patch` Delete File 指令也拒绝，请先使用 `safedelete delete`；普通补丁继续运行。
 项目通过 `.git` 或最近的恢复区识别；没有这些标记时，当前目录就是项目根目录。
 
+### 覆盖边界
+
 **范围：** 这是 shell 命令安全保护，不是操作系统沙箱。
 Codex 必须加载受信任的 PreToolUse Hook。
 任意程序、自定义工具、删去文件内容的编辑、文件重命名，以及后来通过 `write_stdin`
@@ -200,23 +265,6 @@ Codex 必须加载受信任的 PreToolUse Hook。
 不要用交互式 shell 或绕过 Hook 来删除文件。`SKILL.md` 提供代理使用指导；即使不用 Skill，
 Hook 也会处理已识别的 shell 删除。安装前已永久删除的文件无法恢复。
 更广泛的保护请使用系统备份。
-
-卸载时，在同一目录双击 **`Uninstall SafeDelete.cmd`**；可恢复的文件仍保留。
-也可以用 PowerShell：
-
-```powershell
-.\uninstall.ps1
-```
-
-请用双击入口或独立 PowerShell 终端安装、卸载。
-Hook 会拒绝代理调用的不透明脚本。
-
-安装会保留已有 Hook，并逐字节备份原 Codex 配置。
-完整安装后的卸载恢复原配置，并移除 SafeDelete 的 PATH 项；项目内的恢复文件保留。
-若用户后来修改了配置或 PATH，卸载会停止，避免覆盖，并提供备份位置。
-若安装已完整回滚，卸载只清理残留安装文件，保留当前配置和 PATH。
-Desktop 的临时 `codex-computer-use` 命名管道 GUID 变化，仅在内存回填该值后，
-整份配置哈希与已安装配置完全匹配时接受；其他配置或 PATH 变化仍会阻止卸载。
 
 实际运行记录、命令与限制见 [TEST-RESULTS.md](TEST-RESULTS.md)。
 Node/npm 和 Python 仅用于测试，产品运行不需要它们。

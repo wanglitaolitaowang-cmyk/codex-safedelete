@@ -14,15 +14,28 @@ trash. `safedelete undo` restores successfully saved files and directories.
 
 ### Install
 
-Double-click:
+Requires Windows 10 1809 or newer, PowerShell 5.1 or newer, and a local
+`codex.exe` (included with Codex Desktop). Windows 11 is the verified baseline;
+see [compatibility](#compatibility-and-verification) for the tested versions.
 
-```text
-Install SafeDelete.cmd
+1. On this repository's GitHub page, choose **Code → Download ZIP**.
+   [GitHub download instructions](https://docs.github.com/en/repositories/working-with-files/using-files/downloading-source-code-archives)
+2. Extract the entire ZIP, then open the extracted project folder.
+3. Double-click **`Install SafeDelete.cmd`** and wait for installation to succeed.
+4. Fully quit and relaunch Codex, then open a new Windows PowerShell terminal
+   and check:
+
+```powershell
+safedelete status
 ```
 
-Reopen Codex and your terminal once. That's it.
+The result should be `ON`. Installation does not reload an already-running
+conversation; opening another chat in the same running app is not a full restart.
+Use [upgrade instructions](#upgrade-an-existing-installation) for an older install.
 
 ### Accidentally deleted something?
+
+Open Windows PowerShell in the project where the deletion happened, then run:
 
 ```powershell
 safedelete undo
@@ -62,16 +75,62 @@ safedelete status
 `ON` means the local Hook is registered, enabled, trusted and verified.
 `OFF` means its protection is paused. `UNKNOWN` means configuration needs
 attention; the command returns an error instead of claiming protection.
+This checks local registration and Hook execution; it does not confirm that an
+already-running conversation has loaded the configuration. Fully restart Codex
+after installation or upgrade.
+
+## Upgrade an existing installation
+
+Repeating installation verifies the existing program; it does not upgrade its
+files. If program files differ, installation stops and preserves the existing install.
+
+1. Use **`Uninstall SafeDelete.cmd`** from the original version's project folder.
+   If it reports a configuration conflict, see the [uninstall section](#uninstall).
+2. Fully quit and relaunch Codex, and open a new terminal.
+3. Download and extract the new version, then double-click its
+   **`Install SafeDelete.cmd`**.
+4. After successful installation, fully quit and relaunch Codex again, open a
+   new terminal, and run `safedelete status` to confirm `ON`.
+
+Project trash and recovery history are preserved during uninstall and upgrade.
 
 ## Uninstall
 
 Double-click **`Uninstall SafeDelete.cmd`**.
 
-Reopen Codex and your terminal after uninstalling to clear the running Hook and PATH.
+Fully quit and relaunch Codex, and open a new terminal after uninstalling to
+clear the running Hook and refresh PATH.
 
 Pause temporarily disables protection while SafeDelete stays installed.
-Uninstall removes SafeDelete and restores the original Codex configuration
-and PATH. Both preserve previously saved project trash and history.
+Uninstall removes SafeDelete, restores the original Codex configuration and
+reverses the installer's PATH changes. If configuration or PATH was edited after
+installation, uninstall stops and points to the backups. Both preserve
+previously saved project trash and history.
+
+<details>
+<summary>Uninstall details</summary>
+
+From the original version's project folder, you can also use PowerShell:
+
+```powershell
+.\uninstall.ps1
+```
+
+Use the launchers or a separate PowerShell terminal for installation and
+uninstallation. The Hook deliberately refuses opaque scripts invoked by the agent.
+
+The installer preserves existing hooks and backs up the original Codex
+configuration byte for byte. Uninstall of a completed installation restores it
+and reverses the PATH changes recorded by the installer; project trash stays
+available. If configuration or PATH was changed afterward, uninstall stops
+before overwriting those changes and points to the backups. After a completed
+rollback, uninstall only removes the leftover installation files and keeps the
+current configuration and PATH.
+Desktop's temporary `codex-computer-use` named-pipe GUID rotation is accepted
+only if restoring that value in memory reproduces the complete installed
+configuration hash. Other configuration or PATH changes still stop uninstall.
+
+</details>
 
 ```text
 Codex tries:
@@ -84,8 +143,9 @@ safedelete undo
 → src/ restored
 ```
 
-**Local Windows MVP.** No file uploads, server, account or background service.
-MIT licensed.
+## Compatibility and verification
+
+**Windows local MVP / preview.** MIT licensed.
 
 | Environment | Verification status |
 | --- | --- |
@@ -105,7 +165,7 @@ post-install deletion was not intercepted. See
 [TEST-RESULTS.md](TEST-RESULTS.md) for the tested scope and retained failures.
 
 The installer requires Windows 10 version 1809 (build 17763) or newer and PowerShell 5.1 or
-newer. This follows [Codex's Windows requirements](https://developers.openai.com/codex/windows).
+newer. This follows [Codex's Windows requirements](https://learn.chatgpt.com/docs/windows/windows-sandbox).
 Windows 11 is recommended by Codex; Windows 10 support is best effort.
 
 Pause/resume, persistence after full Desktop restarts, recovery of earlier
@@ -115,6 +175,10 @@ Default compatibility with 360 or other antivirus products is not proven.
 A Hook blocked by security software cannot protect deletes. Review the scripts
 and warning before deciding whether to permit them; the installer never changes
 antivirus settings or adds exclusions. Its self-check uses a readable command.
+
+## Installation and troubleshooting
+
+### Installation checks and retrying
 
 The launchers use Windows PowerShell 5.1, require no administrator access,
 and keep the result window open. Execution-policy bypass applies only to
@@ -127,6 +191,8 @@ installation, then double-click `Install SafeDelete.cmd` to retry. Cleanup keeps
 configuration and PATH changes made after rollback. If rollback is incomplete,
 inspect the error and preserved backups before retrying.
 
+### Installation location and legacy migration
+
 The default program folder is `%USERPROFILE%\.codex-safedelete-app`, shared by
 Explorer and Codex. MSIX desktop apps can redirect the old AppData location into
 their package cache, leaving Explorer with a Hook registration but no visible
@@ -136,11 +202,7 @@ records. Pause, resume and status also verify a retained legacy cached Hook so
 its switch stays consistent until Codex restarts. Ambiguous installations, conflicts and missing valid state are preserved
 with a diagnostic; registration is not removed blindly.
 
-Repeating installation in the shared folder verifies the existing program; it does not upgrade its
-files. If this checkout's program files differ, installation stops without
-changing the existing installation. Use `Uninstall SafeDelete.cmd` from the
-original version, reopen Codex and your terminal, then install the new version. Project trash and history are
-preserved during uninstall.
+### Existing or conflicting installations
 
 For the same Windows user, installation and uninstall cannot run concurrently
 against the same installation folder or Codex configuration. If either is busy,
@@ -154,6 +216,8 @@ or conflicting metadata produce an error with the relevant source and keys.
 Use the original uninstaller for an existing installation. Preserve the error
 and configuration backup when installation state is missing or incomplete.
 
+### Install from PowerShell
+
 Advanced users can install from PowerShell in the extracted project folder:
 
 ```powershell
@@ -166,10 +230,12 @@ Restart Codex and open a new terminal. In Codex `/hooks`, confirm SafeDelete
 is enabled and trusted. Installation verifies registration through your local
 Codex app-server; an unsupported version produces an error and rolls back.
 
+## Recovery commands and stored data
+
 From the affected project:
 
 ```powershell
-safedelete undo           # Restore the latest deletion
+safedelete undo           # Restore this project's latest recoverable deletion
 safedelete list           # Show records and original paths
 safedelete restore <id>   # Restore an earlier deletion
 safedelete delete src/    # Delete safely yourself
@@ -184,6 +250,10 @@ Content checks allow interrupted restores to finish safely; reading large files
 can take longer. An interrupted record from an older version may lack these
 checks and require manual recovery. Its remaining trash is preserved.
 
+## Protection behavior and limits
+
+### Pause state
+
 The pause switch is installation-wide and persists across Codex restarts.
 It changes only `protection-state.json` in the installation folder; Codex
 configuration and PATH are untouched. The Hook reads it on every invocation.
@@ -193,6 +263,8 @@ it deny commands. Only pause when you intend to stop protection; agents must
 not pause to work around a denied delete.
 For versions installed before pause support, use the original uninstaller
 before installing this version; the installer does not silently overwrite them.
+
+### Supported deletes
 
 Automatic recovery supports literal PowerShell deletion commands. With the
 default Windows shell, use `Remove-Item`; ambiguous aliases such as `rm`, `del`,
@@ -223,6 +295,8 @@ first. Ordinary patches continue to work.
 The project is discovered from `.git` or the nearest recovery store; otherwise
 the current directory is its root.
 
+### Coverage
+
 **Scope:** this is a shell-command safety net, not an operating system sandbox.
 Codex must load this trusted PreToolUse hook. Arbitrary programs, custom tools,
 file edits that remove content, file renames and commands sent later
@@ -231,26 +305,6 @@ Do not use interactive shells or bypass the hook for deletion. The supplied
 `SKILL.md` adds agent guidance; the hook handles recognized shell deletes even
 without the skill. Files already permanently deleted before installation cannot
 be recovered. Use an OS backup for broader protection.
-
-To uninstall, double-click **`Uninstall SafeDelete.cmd`** in the same folder.
-Your recoverable trash is preserved. Or use PowerShell:
-
-```powershell
-.\uninstall.ps1
-```
-
-Use the launchers or a separate PowerShell terminal for installation and
-uninstallation. The Hook deliberately refuses opaque scripts invoked by the agent.
-
-The installer preserves existing hooks and backs up the original Codex
-configuration byte for byte. Uninstall of a completed installation restores it
-and removes its PATH entry; project trash stays available. If configuration or
-PATH was changed afterward, uninstall stops before overwriting those changes
-and points to the backups. After a completed rollback, uninstall only removes
-the leftover installation files and keeps the current configuration and PATH.
-Desktop's temporary `codex-computer-use` named-pipe GUID rotation is accepted
-only if restoring that value in memory reproduces the complete installed
-configuration hash. Other configuration or PATH changes still stop uninstall.
 
 See [TEST-RESULTS.md](TEST-RESULTS.md) for actual runs, commands and limits.
 Node/npm and Python are test tools only; the product needs neither.
