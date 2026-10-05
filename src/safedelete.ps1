@@ -37,7 +37,11 @@ try {
         Write-Output ('SafeDelete: ' + $result)
         Write-Output ''
         switch ($result) {
-            'ON' { Write-Output 'Codex delete protection is active.' }
+            'ON' {
+                Write-Output 'Local Hook registration and execution checks passed.'
+                Write-Output 'After installation or upgrade, fully quit and relaunch Codex.'
+                Write-Output 'ON does not confirm that an already-running chat has loaded the Hook.'
+            }
             'OFF' { Write-Output 'Codex delete protection is currently disabled.' }
             default { Write-Output 'Configuration requires attention.'; exit 1 }
         }

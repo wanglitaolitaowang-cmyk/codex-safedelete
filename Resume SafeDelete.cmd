@@ -17,12 +17,13 @@ set "safedelete_exit=%errorlevel%"
 :result
 if not "%safedelete_exit%"=="0" goto failed
 echo.
-echo SafeDelete protection enabled.
+echo SafeDelete is enabled in the local configuration.
 echo.
-echo [OK] Codex delete protection active
+echo [OK] Local Hook registration and execution checks passed
 echo [OK] Existing recovery history preserved
 echo.
-echo You can use Codex normally.
+echo After installation or upgrade, fully quit and relaunch Codex.
+echo An already-running chat may not have loaded the Hook.
 goto finish
 :missing
 set "safedelete_exit=1"

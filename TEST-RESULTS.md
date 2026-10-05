@@ -16,9 +16,22 @@ The tested version is the **uncommitted workspace repair based on
 `586a487ef0732a115206d1019ad8a38118ba1fb4`**; that commit alone does not identify
 the repair. The final paired run verified all **14 frozen source/test files**
 against workspace bytes before and after execution, with no changed files.
-See the [repair report](work/configuration-ownership-fix-20261005.md),
-[final paired full run](tests/.work/tr-20261004-163246-0d369781/pair-results.json)
-and [independent full audit](tests/.work/configuration-ownership-fix-20261004/full-regression-root-audit.json).
+The configuration ownership repair and its regression tests were subsequently
+committed as `7de475e420080033ead50d717a3cedbd5ae11fd8`. The later README
+revisions are recorded in `f3f98988fd33ad2f6942c3bbbb4789542d1c28b9`.
+The results below retain the original frozen, pre-commit test provenance.
+
+Evidence paths beginning `work/` or `tests/.work/` refer to records retained
+locally by the tester. These ignored directories and their raw logs, configuration
+snapshots, installation state and recovery data are excluded from the public
+repository and source package. The public [test scripts](tests/) can reproduce
+the isolated checks.
+
+Local records:
+
+- Repair report: `work/configuration-ownership-fix-20261005.md`
+- Final paired full run: `tests/.work/tr-20261004-163246-0d369781/pair-results.json`
+- Independent full audit: `tests/.work/configuration-ownership-fix-20261004/full-regression-root-audit.json`
 
 Completed checks used Windows PowerShell **5.1.22621.5909** and PowerShell
 **7.6.5**, native Codex CLI **0.160.0**, and isolated workspace fixtures:
@@ -40,9 +53,10 @@ child-process records and both sets of six source hashes, with no errors or
 hash mismatches. The paired cold CLI run retained **8 JSONL files / 48 events**,
 all fully parsed, and used `danger-full-access` with synthetic requests; it does
 not establish Desktop permission behavior or online-model compatibility.
-Supporting evidence is linked from the repair report, including the
-[cold CLI audit](tests/.work/configuration-ownership-fix-20261004/native-cli/pair-20261004-160125-80111ca3/independent-audit.json)
-and [preflight/self-check audit](tests/.work/configuration-ownership-fix-20261004/supporting/validation-summary.json).
+Supporting evidence is indexed in the locally retained repair report, including:
+
+- Cold CLI audit: `tests/.work/configuration-ownership-fix-20261004/native-cli/pair-20261004-160125-80111ca3/independent-audit.json`
+- Preflight/self-check audit: `tests/.work/configuration-ownership-fix-20261004/supporting/validation-summary.json`
 
 The concurrency and recovery tests exercise the real local SDK with explicitly
 injected writes, failures and timeouts at defined boundaries. AppData/package
@@ -58,8 +72,10 @@ passed. All four install/uninstall processes exited **0**, with **0 stderr
 bytes**. The original configuration and User PATH were restored at uninstall;
 **11/11 installed source files**, the legacy cache and all **587 existing
 recovery-store files** were verified. Final protection is **ON**.
-See [upgrade evidence](work/machine-update-20261005-d0c721dc/Upgrade-result.json)
-and [uninstall/reinstall evidence](work/machine-update-20261005-d0c721dc/VerifyUninstall-result.json).
+Local records:
+
+- Upgrade evidence: `work/machine-update-20261005-d0c721dc/Upgrade-result.json`
+- Uninstall/reinstall evidence: `work/machine-update-20261005-d0c721dc/VerifyUninstall-result.json`
 
 The still-running conversation's first synthetic deletion after reinstall did
 not create a recovery record. Its independently backed-up synthetic data was
@@ -73,9 +89,10 @@ Actual `apply_patch` deletion was refused by the SafeDelete PreToolUse Hook,
 with the text probe unchanged. The new conversation resolves `safedelete` to
 the shared installation. Reopening Codex and terminals remains an installation
 requirement; hot reload during an already-running conversation is not certified.
-See [current release verification](VERIFICATION-20261005.md),
-[actual deletion/recovery](work/machine-update-20261005-d0c721dc/desktop-delete-restore-after-restart.json)
-and [actual patch refusal](work/machine-update-20261005-d0c721dc/desktop-patch-tool-response.json).
+See [current release verification](VERIFICATION-20261005.md). Local records:
+
+- Actual deletion/recovery: `work/machine-update-20261005-d0c721dc/desktop-delete-restore-after-restart.json`
+- Actual patch refusal: `work/machine-update-20261005-d0c721dc/desktop-patch-tool-response.json`
 
 Tested locally on **2026-10-04 (UTC+08:00)**. Windows build 22631 (23H2),
 Codex CLI **0.160.0**, Git 2.55.0. Production code uses PowerShell and .NET only.

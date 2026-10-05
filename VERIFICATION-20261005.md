@@ -1,10 +1,16 @@
 # Release candidate verification — 2026-10-05 (UTC+08:00)
 
 This candidate is ready for a Windows local MVP / preview release within the
-tested environment below. The source package's `SOURCE-MANIFEST.json` records
-every included file's SHA256. Its source baseline is
-`586a487ef0732a115206d1019ad8a38118ba1fb4`, with the configuration ownership
-repair and regression tests included as workspace changes.
+tested environment below. The locally retained source package's
+`SOURCE-MANIFEST.json` records every included file's SHA256. At testing time,
+its source baseline was `586a487ef0732a115206d1019ad8a38118ba1fb4`, with the
+configuration ownership repair and regression tests included as frozen
+workspace changes.
+
+Those repair changes were subsequently committed as
+`7de475e420080033ead50d717a3cedbd5ae11fd8`; later README revisions are recorded
+in `f3f98988fd33ad2f6942c3bbbb4789542d1c28b9`. This report retains the
+original pre-commit test provenance.
 
 ## Tested environment and checks
 
@@ -56,6 +62,12 @@ failure. Independent Windows 10 machines, other Codex versions, online-model
 behavior and other/default antivirus settings still need separate validation.
 Linux, macOS and Windows 7 remain outside this release's supported platforms.
 
-The source package includes `tests/helpers/trust-concurrency.ps1`, required by
-the migration regression harness. Machine configuration backups, recovery
-history, test logs and installation state are excluded from the source package.
+The source package includes [the trust-concurrency test helper](tests/helpers/trust-concurrency.ps1),
+required by the migration regression harness. Public checks are available in
+[the test scripts](tests/); [TEST-RESULTS.md](TEST-RESULTS.md) describes their
+results and scope.
+
+Evidence paths under `work/` and `tests/.work/`, along with the locally retained
+package manifest, are local-only records. Machine configuration backups, recovery
+history, raw test logs and installation state are excluded from the public
+repository and source package.
